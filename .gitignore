@@ -28,7 +28,10 @@ logs/
 *.log
 
 # ---- 编辑器与系统 ----
-.vscode/
+# 保留工程内的运行/调试配置，其余忽略
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
 .idea/
 .DS_Store
 Thumbs.db
