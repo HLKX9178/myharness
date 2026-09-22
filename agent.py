@@ -88,8 +88,23 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
     except Exception as exc:
         return f"Error: {type(exc).__name__}: {exc}"
      
-        
+def write_file(path: str, content: str) -> str:
+    """写一个文件。出错就返回错误字符串，不抛异常"""
+    try:
+        file_path = safe_path(path)
+        file_path.write_text(content, encoding="utf-8")
+        return f"Wrote {len(content)} bytes to {path}"
+    except Exception as exc:
+        return f"Error: {type(exc).__name__}: {exc}"
 
+def run_glob(pattern):
+    import glob as g
+    matches = sorted(set(g.glob(
+        pattern, root_dir=WORKDIR, recursive=True)))
+    shown = matches[:200]
+    if len(matches) > 200:
+        shown.append("... (more matches omitted; narrow the pattern)")
+    return "\n".join(shown)
 
 # 定义：模型靠这个知道"有哪些工具、参数长什么样"
 TOOLS = [
@@ -127,14 +142,39 @@ TOOLS = [
             },
             "required": ["path", "old_text", "new_text"],
         },
+    },
+    {
+        "name": "write_file",
+        "description": "Write to a file in the working directory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path"},
+                "content": {"type": "string", "description": "Content to write"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "glob_files",
+        "description": "List files in the working directory matching a pattern.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern"},
+            },
+            "required": ["pattern"],
+        },
     }
 ]
 
 # 实现：工具名 -> 函数
-HANDLERS = {
+TOOL_HANDLERS = {
     "bash": run_bash,
     "read_file": read_file,
     "edit_file": edit_file,
+    "write_file": write_file,
+    "glob_files": run_glob,
 }
 
 MAX_TURNS = 20  # 防止模型无限循环，这是最重要的一行保险
@@ -159,7 +199,7 @@ def agent_loop(messages: list) -> None:
         results = []
         for block in tool_calls:
             print(f"{Color.YELLOW}  [tool] {block.name}({block.input}){Color.RESET}")
-            handler = HANDLERS.get(block.name)
+            handler = TOOL_HANDLERS.get(block.name)
             try:
                 output = (
                     str(handler(**block.input))
