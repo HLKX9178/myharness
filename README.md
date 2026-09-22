@@ -46,23 +46,32 @@ cp .env.example .env
 ## 运行
 
 ```sh
-python agent.py
+python -m myharness
 ```
 
 Windows 下也可直接双击 `run.bat`，或在 VS Code 中按 `F5` 启动（带断点调试）。
 
 ## 目录结构
 
-结构随能力逐步建立，当前已有：
-
 ```text
-agent.py            Agent 主循环与工具集
-AGENTS.md           开发指南（Agent 与人类协作者共同遵守）
-.env.example        配置模板
-requirements.txt    依赖
-run.bat             Windows 一键启动
-.vscode/            VS Code 调试与编辑器配置
+myharness/                  仓库根：只放工具链、文档与项目元数据
+├── README.md               本文件
+├── AGENTS.md               开发指南（Agent 与人类协作者共同遵守）
+├── requirements.txt        依赖
+├── run.bat                 Windows 一键启动
+├── .vscode/                VS Code 调试与编辑器配置
+│
+└── myharness/              源码包
+    ├── __main__.py         python -m myharness 入口
+    ├── cli.py              终端交互
+    ├── loop.py             Agent Loop
+    ├── config.py           配置与共享依赖
+    ├── tools.py            工具定义与实现
+    └── ui.py               终端输出样式
 ```
+
+**根目录只允许出现四类内容**：工具链文件、文档、入口脚本、顶层目录。
+任何 Python 模块都不得直接放在仓库根目录。
 
 规划中的模块划分、依赖方向与职责边界见 [`AGENTS.md`](AGENTS.md#3-架构与模块边界)。
 
