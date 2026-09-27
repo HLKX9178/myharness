@@ -13,6 +13,8 @@ import glob
 import subprocess
 
 from myharness.config import WORKDIR
+from myharness.security import get_policy
+from myharness.audit import get_audit_logger
 
 
 # ============================================================
@@ -26,16 +28,44 @@ def safe_path(p: str):
     工具函数捕获并转成错误字符串。
     """
     path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
-        raise ValueError(f"Path escapes workspace: {p}")
+
+    # 使用安全策略检查
+    policy = get_policy()
+    allowed, reason = policy.check_path(path)
+
+    # 记录审计日志
+    audit = get_audit_logger()
+    audit.log_decision(
+        action="path_check",
+        target=str(path),
+        decision="allowed" if allowed else "denied",
+        reason=reason,
+    )
+
+    if not allowed:
+        raise ValueError(reason)
+
     return path
 
 
 def run_bash(command: str) -> str:
     """执行一条 shell 命令。"""
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return "Error: Dangerous command blocked"
+    # 使用安全策略检查命令
+    policy = get_policy()
+    allowed, reason = policy.check_command(command)
+
+    # 记录审计日志
+    audit = get_audit_logger()
+    audit.log_decision(
+        action="bash",
+        target=command,
+        decision="allowed" if allowed else "denied",
+        reason=reason,
+    )
+
+    if not allowed:
+        return f"Error: {reason}"
+
     try:
         r = subprocess.run(
             command,
@@ -43,6 +73,7 @@ def run_bash(command: str) -> str:
             cwd=WORKDIR,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             errors="replace",
             timeout=120,
         )

@@ -9,10 +9,14 @@
 from myharness.config import SYSTEM, provider
 from myharness.tools import TOOL_HANDLERS, TOOLS
 from myharness.ui import Color
+from myharness.context import ContextManager
 
 MAX_TURNS = 20  # 防止模型无限循环
 MAX_TOTAL_TOKENS = 100000  # token 上限
 MAX_CONSECUTIVE_FAILURES = 3  # 连续失败上限
+
+# 上下文管理器
+context_manager = ContextManager(max_messages=30)
 
 def agent_loop(messages: list) -> None:
     """驱动一轮完整对话，直到模型给出不再调用工具的回复。"""
@@ -21,6 +25,12 @@ def agent_loop(messages: list) -> None:
     last_tool_call = None  # 格式: (name, input_hash)
 
     for turn in range(MAX_TURNS):
+        # 压缩上下文（如果需要）
+        if context_manager.should_compress(messages):
+            print(f"{Color.YELLOW}  [context] 压缩历史消息: {len(messages)} -> ", end="")
+            messages[:] = context_manager.compress(messages)
+            print(f"{len(messages)}{Color.RESET}")
+
         response = provider.chat(
             messages=messages,
             tools=TOOLS,
