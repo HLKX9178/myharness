@@ -6,7 +6,7 @@
 本模块只负责编排，不含任何具体工具实现，也不直接读写终端输入。
 """
 
-from myharness.config import MODEL, SYSTEM, client
+from myharness.config import SYSTEM, provider
 from myharness.tools import TOOL_HANDLERS, TOOLS
 from myharness.ui import Color
 
@@ -21,11 +21,10 @@ def agent_loop(messages: list) -> None:
     last_tool_call = None  # 格式: (name, input_hash)
 
     for turn in range(MAX_TURNS):
-        response = client.messages.create(
-            model=MODEL,
-            system=SYSTEM,
+        response = provider.chat(
             messages=messages,
             tools=TOOLS,
+            system=SYSTEM,
             max_tokens=2000,
         )
         messages.append({"role": "assistant", "content": response.content})
