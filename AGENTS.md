@@ -94,6 +94,46 @@ TOOL_DEFS = [{"name": "read_file", "input_schema": {...}}]
 - 提交前必须确认 `.env` 未被跟踪
 - 新增任何密钥类文件时，同步更新 `.gitignore`
 
+### 契约 6：横切逻辑实现为 hook，不得写进 Agent Loop
+
+权限、审计、日志、指标、上下文注入、结果展示一律通过 hook 注册，
+**不允许写进 `agent_loop`**。工具执行只允许经过 `dispatch.execute_tool()`。
+
+```python
+# ✅ 正确：loop 只负责编排
+for block in tool_calls:
+    output = execute_tool(block, handlers)      # 唯一执行入口
+
+# ❌ 错误：在 loop 里展开工具执行与硬编码检查
+handler = TOOL_HANDLERS.get(block.name)
+if block.name in ("read_file", "write_file") and is_outside(path): ...
+```
+
+**四个扩展点**：`UserPromptSubmit` · `PreToolUse` · `PostToolUse` · `Stop`
+
+**语义**：hook 返回 `None` 表示放行；返回其它值表示拦截，
+该值会短路后续 hook 并成为 `tool_result`。
+
+**注册顺序即执行顺序。** `permission_hook` 必须排在 `log_hook` 之前 ——
+被拒绝的调用不应产生"已调用"的日志。
+
+**判断标准：策略还是机制？**
+
+| 类型 | 归处 | 例子 |
+|---|---|---|
+| 可替换的横切策略 | **hook** | 权限、审计、日志、结果展示 |
+| 循环自身的不变量 | **loop** | `MAX_TURNS`、token 预算、跨轮累计状态 |
+| 需要替换整个 `messages` | **loop** | 上下文压缩 |
+
+**为什么这条是硬约束**：
+
+1. 硬编码进 loop 的横切逻辑会随功能增长无限膨胀；
+2. 更严重的是 —— 权限判定若依赖"每个工具自己记得调用"，
+   新增工具就会**静默绕过**安全检查。hook 位于 dispatch 路径上，
+   使绕过在结构上不可能。
+
+**验证方式**：`tests/test_hooks.py` 中的架构约束测试会在违反本条时失败。
+
 ---
 
 ## 3. 架构与模块边界
@@ -114,21 +154,21 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 │   ├── __init__.py
 │   ├── __main__.py             #   python -m myharness 入口
 │   ├── cli.py                  #   终端交互
-│   ├── loop.py                 #   Agent Loop 编排
-│   ├── config.py               #   配置加载与校验
+│   ├── loop.py                 #   Agent Loop 编排（不含横切逻辑）
+│   ├── hooks.py                #   Hook 注册表（契约 6 的载体）
+│   ├── dispatch.py             #   唯一的工具执行入口
+│   ├── bootstrap.py            #   内置 hook 的集中装配点
+│   ├── config.py               #   配置加载与共享依赖
 │   ├── providers/              #   模型 Provider 抽象与适配
-│   ├── tools/                  #   工具
-│   │   ├── registry.py         #     注册表：名字 → 定义 + 实现
-│   │   ├── files.py            #     文件类工具
-│   │   ├── shell.py            #     命令类工具
-│   │   └── mcp.py              #     MCP 接入
-│   ├── policy/                 #   权限策略、沙箱、审批、审计
-│   ├── memory/                 #   会话、上下文预算、压缩、长期记忆
-│   ├── runtime/                #   调度、后台任务、持久化
-│   ├── teams/                  #   多 Agent 协作
-│   └── observability/          #   追踪、成本归因
+│   ├── tools.py                #   工具定义与实现 + assemble_tool_pool
+│   ├── security.py             #   权限策略 + permission_hook
+│   ├── audit.py                #   审计日志
+│   ├── observability.py        #   日志 / 告警 / 小结 hook
+│   ├── context.py              #   上下文压缩
+│   ├── session.py              #   会话持久化
+│   └── ui.py                   #   终端输出样式
 │
-├── tests/                      # 测试
+├── tests/                      # 测试（**必须入库**）
 └── eval/                       # 评测集与回归
 ```
 
@@ -183,13 +223,17 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 
 | 模块 | 负责 | 不负责 |
 |---|---|---|
-| `agent.py` | 编排循环、组装工具池、调用 provider | 具体工具实现、权限判定 |
+| `loop.py` | 编排循环、调用 provider、循环不变量 | 工具实现、权限判定、日志展示 |
+| `hooks.py` | Hook 注册表与触发语义 | 具体 hook 的业务 |
+| `dispatch.py` | 唯一的工具执行入口（Pre → handler → Post） | 权限规则、工具业务 |
+| `bootstrap.py` | 集中注册内置 hook | hook 的实现 |
 | `providers/` | 模型调用、请求/响应适配、重试 | 工具执行、消息持久化 |
-| `tools/` | 工具定义与实现、参数校验 | 权限决策、审计落库 |
-| `policy/` | 权限判定、审批流、沙箱、审计 | 工具业务逻辑 |
-| `memory/` | 会话读写、上下文预算、压缩 | 模型调用 |
-| `runtime/` | 任务调度、并发、持久化 | 工具业务逻辑 |
-| `observability/` | 追踪、指标、成本归因 | 业务逻辑 |
+| `tools.py` | 工具定义与实现、`assemble_tool_pool` | 权限决策、审计落库 |
+| `security.py` | 权限策略 + `permission_hook` | 工具业务逻辑 |
+| `audit.py` | 审计日志读写 | 决定是否放行 |
+| `observability.py` | 日志、告警、会话小结 hook | 业务逻辑 |
+| `context.py` | 上下文预算与压缩 | 模型调用 |
+| `session.py` | 会话持久化 | 模型调用 |
 
 **跨模块功能必须落在职责所属的模块**，不得为了方便塞进 `agent.py`。
 
@@ -470,6 +514,9 @@ test(eval): 新增 20 条评测用例
 
 - [ ] 工具函数只返回字符串，无异常逃逸
 - [ ] 新增工具的定义与实现在同一位置，且已注册到工具池
+- [ ] **横切逻辑挂在 hook 上，未写进 `agent_loop`**
+- [ ] **工具执行经过 `execute_tool()`，未直接调用 handler**
+- [ ] **新增工具已确认被 `permission_hook` 覆盖**（否则会静默绕过安全检查）
 - [ ] 没有引入可变全局状态
 - [ ] 文件读写显式指定 `encoding="utf-8"`
 - [ ] 文件路径经过 workspace 边界校验
@@ -478,6 +525,7 @@ test(eval): 新增 20 条评测用例
 - [ ] 改动范围只包含本次任务，未夹带无关清理
 - [ ] 提交信息符合 Conventional Commits
 - [ ] 有对应的验证方式（测试 / 评测 / 可复现的手动步骤）
+- [ ] `pytest tests/` 全部通过
 
 ---
 
