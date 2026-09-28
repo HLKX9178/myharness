@@ -4,6 +4,7 @@ import sys
 import argparse
 
 from myharness.config import WORKDIR, SESSION_DIR, provider
+from myharness.hooks import trigger_hooks
 from myharness.loop import agent_loop
 from myharness.session import Session
 from myharness.ui import Color
@@ -65,6 +66,9 @@ def main() -> None:
             break
         if query.strip().lower() in {"q", "exit", ""}:
             break
+
+        # UserPromptSubmit：用户输入进入模型之前（hook 层负责）
+        trigger_hooks("UserPromptSubmit", query)
 
         # 添加用户消息到会话
         session.add_message("user", query)

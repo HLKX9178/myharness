@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from myharness.providers import PROVIDER_REGISTRY
 from myharness.security import init_policy
 from myharness.audit import init_audit_logger
+from myharness.bootstrap import install_default_hooks
 
 # 仓库根目录：<repo>/myharness/config.py -> <repo>/myharness -> <repo>
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +36,10 @@ AUDIT_LOG = REPO_ROOT / ".myharness" / "audit.jsonl"
 # 初始化安全策略和审计日志
 init_policy(WORKDIR)
 init_audit_logger(AUDIT_LOG)
+
+# 装配内置 hook（权限、审计、日志、上下文、Stop）。
+# 必须在上面的 init_* 之后，因为部分 hook 依赖这些全局实例。
+install_default_hooks()
 
 # Provider 配置
 PROVIDER_TYPE = os.getenv("PROVIDER", "anthropic")  # 默认使用 Anthropic

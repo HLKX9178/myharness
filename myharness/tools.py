@@ -5,67 +5,41 @@
   1. 实现 —— 真正执行的函数
   2. 定义 —— 放进 TOOLS，给模型看的 JSON Schema
 
+职责边界：**工具只做业务**（读文件、跑命令），不做权限判定、不写审计日志。
+那些属于 hook 层（见 AGENTS.md 契约 6）。
+
 契约（见 AGENTS.md 契约 1）：所有工具函数只返回字符串，
 出错返回 "Error: ..."，绝不抛异常。
 """
 
 import glob
 import subprocess
+from pathlib import Path
+from typing import Callable
 
 from myharness.config import WORKDIR
-from myharness.security import get_policy
-from myharness.audit import get_audit_logger
 
 
 # ============================================================
 # 实现
 # ============================================================
 
-def safe_path(p: str):
+def safe_path(p: str) -> Path:
     """把相对路径 p 转成绝对路径，并确保它落在工作目录内。
 
-    这是内部辅助函数，不是工具。越界时抛出 ValueError，由调用它的
-    工具函数捕获并转成错误字符串。
+    这是**兜底防线**，不是权限层。权限判定由 security.permission_hook
+    在 dispatch 路径上完成；这里只保证即使 hook 被绕过，工具也无法越界。
+
+    越界时抛出 ValueError，由调用它的工具函数捕获并转成错误字符串。
     """
     path = (WORKDIR / p).resolve()
-
-    # 使用安全策略检查
-    policy = get_policy()
-    allowed, reason = policy.check_path(path)
-
-    # 记录审计日志
-    audit = get_audit_logger()
-    audit.log_decision(
-        action="path_check",
-        target=str(path),
-        decision="allowed" if allowed else "denied",
-        reason=reason,
-    )
-
-    if not allowed:
-        raise ValueError(reason)
-
+    if not path.is_relative_to(WORKDIR):
+        raise ValueError(f"Path escapes workspace: {p}")
     return path
 
 
 def run_bash(command: str) -> str:
     """执行一条 shell 命令。"""
-    # 使用安全策略检查命令
-    policy = get_policy()
-    allowed, reason = policy.check_command(command)
-
-    # 记录审计日志
-    audit = get_audit_logger()
-    audit.log_decision(
-        action="bash",
-        target=command,
-        decision="allowed" if allowed else "denied",
-        reason=reason,
-    )
-
-    if not allowed:
-        return f"Error: {reason}"
-
     try:
         r = subprocess.run(
             command,
@@ -88,7 +62,7 @@ def run_bash(command: str) -> str:
 def read_file(path: str) -> str:
     """读取一个文件。"""
     try:
-        return (WORKDIR / path).read_text(encoding="utf-8")
+        return safe_path(path).read_text(encoding="utf-8")
     except Exception as exc:
         return f"Error: {type(exc).__name__}: {exc}"
 
@@ -126,7 +100,7 @@ def run_glob(pattern: str) -> str:
     shown = matches[:200]
     if len(matches) > 200:
         shown.append("... (more matches omitted; narrow the pattern)")
-    return "\n".join(shown)
+    return "\n".join(shown) if shown else "(no matches)"
 
 
 # ============================================================
@@ -202,3 +176,19 @@ TOOL_HANDLERS = {
     "write_file": write_file,
     "glob_files": run_glob,
 }
+
+
+# ============================================================
+# 工具池组装（对应教程 s14 的 assemble_tool_pool）
+# ============================================================
+
+def assemble_tool_pool() -> tuple[list[dict], dict[str, Callable]]:
+    """组装本轮要交给模型的工具池。
+
+    返回 (tools, handlers)，两者来自**同一次快照** —— 这保证模型看到的
+    工具一定都有对应实现。
+
+    目前只有内置工具。M4 接入 MCP 时，在这里合并已连接 server 的工具，
+    agent_loop 不需要任何改动。
+    """
+    return list(TOOLS), dict(TOOL_HANDLERS)

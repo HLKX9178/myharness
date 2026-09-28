@@ -7,7 +7,9 @@
 """
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+
+from myharness.audit import get_audit_logger
 
 
 class SecurityPolicy:
@@ -90,3 +92,52 @@ def get_policy() -> SecurityPolicy:
     if _policy is None:
         raise RuntimeError("Security policy not initialized. Call init_policy() first.")
     return _policy
+
+
+# ============================================================
+# Hook：权限判定与审计
+# ============================================================
+
+# 需要路径边界检查的工具
+_PATH_TOOLS = {"read_file", "write_file", "edit_file"}
+
+# 需要命令黑名单检查的工具
+_COMMAND_TOOLS = {"bash"}
+
+
+def permission_hook(block: Any) -> str | None:
+    """PreToolUse：所有工具的权限判定，并记录审计日志。
+
+    返回 None 表示放行；返回字符串表示拒绝，该字符串会成为 tool_result。
+
+    这个 hook 位于 dispatch 路径上，所以**新增工具无法绕过它** ——
+    只要工具走 execute_tool()，权限就一定被检查。
+
+    注意：路径检查是相对 policy.workspace 解析的，不依赖进程当前目录。
+    """
+    policy = get_policy()
+    name = block.name
+    args = block.input or {}
+
+    if name in _COMMAND_TOOLS:
+        target = str(args.get("command", ""))
+        allowed, reason = policy.check_command(target)
+    elif name in _PATH_TOOLS:
+        raw = str(args.get("path", ""))
+        # 相对路径必须相对 workspace 解析，否则会跟着进程 CWD 漂移
+        target = str(policy.workspace / raw)
+        allowed, reason = policy.check_path(policy.workspace / raw)
+    else:
+        # 没有对应策略的工具（例如 glob_files）默认放行
+        return None
+
+    get_audit_logger().log_decision(
+        action=name,
+        target=target,
+        decision="allowed" if allowed else "denied",
+        reason=reason,
+    )
+
+    if allowed:
+        return None
+    return f"Permission denied: {reason}"
