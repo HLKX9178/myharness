@@ -11,11 +11,17 @@
     register_hook("PostToolUse", large_output_hook)
     register_hook("Stop", summary_hook)
 
-注册顺序即执行顺序。PreToolUse 中 permission_hook 必须排在 log_hook
-之前：被拒绝的调用不应产生"已调用"的日志。
+注册顺序即执行顺序：
+
+  PreToolUse   permission -> repeat_call -> log
+               被拒绝的调用不应被记为"已调用过"，所以权限必须最先。
+
+  PostToolUse  result -> failure -> large_output
+               PostToolUse 不短路，三者都会收到通知。
 """
 
-from myharness.hooks import register_hook
+from myharness.guards import failure_guard, repeat_call_guard
+from myharness.hooks import HOOKS, register_hook
 from myharness.observability import (
     context_inject_hook,
     large_output_hook,
@@ -25,23 +31,23 @@ from myharness.observability import (
 )
 from myharness.security import permission_hook
 
-_installed = False
-
 
 def install_default_hooks() -> None:
-    """注册全部内置 hook。重复调用无副作用。"""
-    global _installed
-    if _installed:
+    """注册全部内置 hook。
+
+    幂等：通过检查实际注册状态判断，而不是依赖隐藏标志位 ——
+    这样测试可以在 clear_hooks() 之后重新装配。
+    """
+    if permission_hook in HOOKS["PreToolUse"]:
         return
 
-    # 权限判定必须最先执行：拒绝即短路，后续 hook 不再运行
     register_hook("PreToolUse", permission_hook)
+    register_hook("PreToolUse", repeat_call_guard)
     register_hook("PreToolUse", log_hook)
 
     register_hook("PostToolUse", result_hook)
+    register_hook("PostToolUse", failure_guard)
     register_hook("PostToolUse", large_output_hook)
 
     register_hook("UserPromptSubmit", context_inject_hook)
     register_hook("Stop", session_summary_hook)
-
-    _installed = True

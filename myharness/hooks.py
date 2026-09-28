@@ -54,6 +54,16 @@ def trigger_hooks(event: str, *args: Any) -> Any:
     return None
 
 
+def trigger_all_hooks(event: str, *args: Any) -> None:
+    """触发全部 hook 并忽略返回值。
+
+    用于 PostToolUse 这类「只观察、不干预」的事件：任何一个 hook 的
+    返回值都不应该阻止其它 hook 收到通知，否则它们会静默丢失事件。
+    """
+    for callback in HOOKS[event]:
+        callback(*args)
+
+
 def registered_hooks(event: str) -> list[HookCallback]:
     """返回某事件已注册的 hook 列表（只读快照，供测试断言）。"""
     return list(HOOKS[event])

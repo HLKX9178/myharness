@@ -9,7 +9,7 @@
 
 from typing import Any, Callable
 
-from myharness.hooks import trigger_hooks
+from myharness.hooks import trigger_all_hooks, trigger_hooks
 
 
 def execute_tool(block: Any, handlers: dict[str, Callable]) -> str:
@@ -34,5 +34,5 @@ def execute_tool(block: Any, handlers: dict[str, Callable]) -> str:
         # 工具报错只变成一条结果，绝不让程序崩掉（见 AGENTS.md 契约 4）
         output = f"Error: {type(exc).__name__}: {exc}"
 
-    trigger_hooks("PostToolUse", block, output)
+    trigger_all_hooks("PostToolUse", block, output)
     return output
