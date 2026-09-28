@@ -121,9 +121,19 @@ if block.name in ("read_file", "write_file") and is_outside(path): ...
 
 | 类型 | 归处 | 例子 |
 |---|---|---|
-| 可替换的横切策略 | **hook** | 权限、审计、日志、结果展示 |
-| 循环自身的不变量 | **loop** | `MAX_TURNS`、token 预算、跨轮累计状态 |
+| 可替换的横切策略 | **hook** | 权限、审计、日志、结果展示、重复调用拦截、失败阈值 |
+| 循环自身的不变量 | **loop** | `MAX_TURNS`、token 预算、清空 hook 跨轮状态 |
 | 需要替换整个 `messages` | **loop** | 上下文压缩 |
+| 需要终止/注入的控制动作 | **loop 执行，策略在 hook** | 连续失败中止：`guards.py` 决定 `should_abort`，loop 执行 `return` |
+
+**有状态 hook 的规则**：hook 可以是可调用对象（而非纯函数），
+但状态必须满足两个条件：
+
+1. 生命周期限于**单次对话轮次**；
+2. 由 `agent_loop` 在轮次开始时通过 `reset_turn_state()` 清空。
+
+否则用户第二遍问同样的问题时，重复调用拦截会误伤。
+参见 `guards.py`。
 
 **为什么这条是硬约束**：
 
@@ -157,6 +167,7 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 │   ├── loop.py                 #   Agent Loop 编排（不含横切逻辑）
 │   ├── hooks.py                #   Hook 注册表（契约 6 的载体）
 │   ├── dispatch.py             #   唯一的工具执行入口
+│   ├── guards.py               #   工具调用守卫（重复调用 / 连续失败）
 │   ├── bootstrap.py            #   内置 hook 的集中装配点
 │   ├── config.py               #   配置加载与共享依赖
 │   ├── providers/              #   模型 Provider 抽象与适配
@@ -217,6 +228,9 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 - 底层模块之间尽量避免相互依赖；确需依赖时，通过参数传入而非全局导入。
 - **禁止使用可变全局状态**。共享状态必须通过显式传入的上下文对象传递。
 
+  **唯一例外**是有状态 hook（见契约 6）：其状态生命周期限于单次对话轮次，
+  且必须由 `agent_loop` 在轮次开始时清空。参见 `guards.py`。
+
 > 全局状态是多 Agent 场景下的头号 bug 来源：它会同时破坏可测试性、并行安全性和多租户隔离。
 
 ### 模块职责边界
@@ -226,6 +240,7 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 | `loop.py` | 编排循环、调用 provider、循环不变量 | 工具实现、权限判定、日志展示 |
 | `hooks.py` | Hook 注册表与触发语义 | 具体 hook 的业务 |
 | `dispatch.py` | 唯一的工具执行入口（Pre → handler → Post） | 权限规则、工具业务 |
+| `guards.py` | 重复调用拦截、连续失败计数与阈值策略 | 终止循环（由 loop 执行） |
 | `bootstrap.py` | 集中注册内置 hook | hook 的实现 |
 | `providers/` | 模型调用、请求/响应适配、重试 | 工具执行、消息持久化 |
 | `tools.py` | 工具定义与实现、`assemble_tool_pool` | 权限决策、审计落库 |
