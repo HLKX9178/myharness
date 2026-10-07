@@ -5,7 +5,6 @@
 
 对应教程 s04 末尾的这一段：
 
-    register_hook("UserPromptSubmit", context_inject_hook)
     register_hook("PreToolUse", permission_hook)
     register_hook("PreToolUse", log_hook)
     register_hook("PostToolUse", large_output_hook)
@@ -23,7 +22,6 @@
 from myharness.guards import failure_guard, repeat_call_guard
 from myharness.hooks import HOOKS, register_hook
 from myharness.observability import (
-    context_inject_hook,
     large_output_hook,
     log_hook,
     result_hook,
@@ -49,5 +47,5 @@ def install_default_hooks() -> None:
     register_hook("PostToolUse", failure_guard)
     register_hook("PostToolUse", large_output_hook)
 
-    register_hook("UserPromptSubmit", context_inject_hook)
+    # UserPromptSubmit 暂无内置 hook；M3 的记忆检索将注册在这里
     register_hook("Stop", session_summary_hook)

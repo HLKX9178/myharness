@@ -67,6 +67,54 @@ def test_trigger_short_circuits_on_first_non_none():
 
 
 # ============================================================
+# UserPromptSubmit 语义
+# ============================================================
+
+def test_user_prompt_without_hooks_is_unchanged():
+    assert hooks.submit_user_prompt("hello") == "hello"
+
+
+def test_user_prompt_injections_are_merged_not_short_circuited():
+    """多个注入 hook 都要生效，后一个不能被前一个吞掉。"""
+    hooks.register_hook("UserPromptSubmit", lambda q: "A")
+    hooks.register_hook("UserPromptSubmit", lambda q: None)
+    hooks.register_hook("UserPromptSubmit", lambda q: "B")
+
+    out = hooks.submit_user_prompt("hello")
+
+    assert out == "<context>\nA\n\nB\n</context>\n\nhello"
+
+
+def test_user_prompt_block_short_circuits():
+    later = []
+    hooks.register_hook("UserPromptSubmit", lambda q: hooks.Block("含密钥"))
+    hooks.register_hook("UserPromptSubmit", lambda q: later.append(q) or "X")
+
+    out = hooks.submit_user_prompt("sk-xxx")
+
+    assert out == hooks.Block("含密钥")
+    assert later == [], "拒绝后不应继续执行后续 hook"
+
+
+def test_user_prompt_blank_injection_is_ignored():
+    hooks.register_hook("UserPromptSubmit", lambda q: "   ")
+    assert hooks.submit_user_prompt("hello") == "hello"
+
+
+def test_user_prompt_rejects_unsupported_return_type():
+    hooks.register_hook("UserPromptSubmit", lambda q: {"oops": 1})
+    with pytest.raises(TypeError):
+        hooks.submit_user_prompt("hello")
+
+
+def test_cli_uses_submit_user_prompt():
+    """cli 不得绕过 submit_user_prompt 直接把原始输入写入会话。"""
+    source = (REPO_ROOT / "myharness" / "cli.py").read_text(encoding="utf-8")
+    assert "submit_user_prompt(" in source
+    assert 'add_message("user", query)' not in source
+
+
+# ============================================================
 # dispatch 语义
 # ============================================================
 

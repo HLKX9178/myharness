@@ -12,17 +12,31 @@
     PostToolUse       工具执行之后（只观察，不改变结果）
     Stop              本轮循环即将结束（返回非 None 可强制续跑）
 
-语义约定：
+语义约定（PreToolUse / Stop）：
 
   - hook 返回 None  -> 放行
   - hook 返回其它值  -> 拦截，且该值短路后续 hook，并成为 tool_result
 
+UserPromptSubmit 语义不同，由 submit_user_prompt() 触发：
+
+  - None      -> 不处理
+  - str       -> 注入上下文；多个 hook 的结果按注册顺序合并，不短路
+  - Block(..) -> 拒绝本次输入，短路后续 hook，输入不进入 messages
+
 这个模块**不依赖项目内任何其它模块**，以便被任意层安全导入。
 """
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 HookCallback = Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class Block:
+    """UserPromptSubmit hook 的拒绝结果。reason 展示给用户，不发给模型。"""
+
+    reason: str
 
 HOOKS: dict[str, list[HookCallback]] = {
     "UserPromptSubmit": [],
@@ -62,6 +76,32 @@ def trigger_all_hooks(event: str, *args: Any) -> None:
     """
     for callback in HOOKS[event]:
         callback(*args)
+
+
+def submit_user_prompt(query: str) -> str | Block:
+    """触发 UserPromptSubmit，返回最终进入 messages 的用户消息，或 Block。
+
+    注入内容放在用户原文之前，用 <context> 包裹，模型能区分哪部分是用户说的。
+    返回值始终是纯字符串消息：context.py 依赖"字符串 content = 新轮次起点"
+    来判断压缩截断点，这里不能改成 block 列表。
+    """
+    injected: list[str] = []
+    for callback in HOOKS["UserPromptSubmit"]:
+        result = callback(query)
+        if isinstance(result, Block):
+            return result
+        if isinstance(result, str) and result.strip():
+            injected.append(result.strip())
+        elif result is not None and not isinstance(result, str):
+            raise TypeError(
+                f"UserPromptSubmit hook {getattr(callback, '__name__', callback)!r} "
+                f"返回了 {type(result).__name__}，只允许 None / str / Block"
+            )
+
+    if not injected:
+        return query
+    context = "\n\n".join(injected)
+    return f"<context>\n{context}\n</context>\n\n{query}"
 
 
 def registered_hooks(event: str) -> list[HookCallback]:

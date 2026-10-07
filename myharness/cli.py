@@ -4,7 +4,7 @@ import sys
 import argparse
 
 from myharness.config import WORKDIR, SESSION_DIR, provider
-from myharness.hooks import trigger_hooks
+from myharness.hooks import Block, submit_user_prompt
 from myharness.loop import agent_loop
 from myharness.session import Session
 from myharness.ui import Color
@@ -67,11 +67,13 @@ def main() -> None:
         if query.strip().lower() in {"q", "exit", ""}:
             break
 
-        # UserPromptSubmit：用户输入进入模型之前（hook 层负责）
-        trigger_hooks("UserPromptSubmit", query)
+        # UserPromptSubmit：hook 可注入上下文，或拒绝这次输入
+        submitted = submit_user_prompt(query)
+        if isinstance(submitted, Block):
+            print(f"{Color.RED}  [blocked] {submitted.reason}{Color.RESET}")
+            continue
 
-        # 添加用户消息到会话
-        session.add_message("user", query)
+        session.add_message("user", submitted)
         print()  # 空行分隔
         agent_loop(history)
 

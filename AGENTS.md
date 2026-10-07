@@ -114,6 +114,17 @@ if block.name in ("read_file", "write_file") and is_outside(path): ...
 **语义**：hook 返回 `None` 表示放行；返回其它值表示拦截，
 该值会短路后续 hook 并成为 `tool_result`。
 
+**UserPromptSubmit 例外**，由 `hooks.submit_user_prompt()` 触发：
+
+| 返回值 | 含义 |
+|---|---|
+| `None` | 不处理 |
+| `str` | 注入上下文；多个 hook 的结果按注册顺序**合并，不短路** |
+| `Block(reason)` | 拒绝本次输入，短路后续 hook；`reason` 只展示给用户，输入不进入 `messages` |
+
+注入内容以 `<context>...</context>` 包裹在用户原文之前，最终消息仍是纯字符串
+（`context.py` 依赖"字符串 content = 新轮次起点"判断压缩截断点）。
+
 **注册顺序即执行顺序。** `permission_hook` 必须排在 `log_hook` 之前 ——
 被拒绝的调用不应产生"已调用"的日志。
 

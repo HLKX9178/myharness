@@ -4,12 +4,11 @@
 而不是写进 agent_loop —— 这样 Loop 才能保持干净。
 
 本模块不导入 config，以免形成 config -> bootstrap -> observability -> config
-的循环依赖。需要工作区路径时从 security 的 policy 取。
+的循环依赖。
 """
 
 from typing import Any
 
-from myharness.security import get_policy
 from myharness.ui import Color
 
 # 超过这个长度就告警（字符数）
@@ -37,13 +36,6 @@ def large_output_hook(block: Any, output: str) -> None:
             f"{Color.YELLOW}  [hook] Large output from {block.name}: "
             f"{len(str(output))} chars{Color.RESET}"
         )
-    return None
-
-
-def context_inject_hook(query: str) -> None:
-    """UserPromptSubmit：用户输入进入模型之前。"""
-    workspace = get_policy().workspace
-    print(f"{Color.GRAY}  [hook] UserPromptSubmit: working in {workspace}{Color.RESET}")
     return None
 
 
