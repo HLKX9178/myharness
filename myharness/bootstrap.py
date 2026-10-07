@@ -17,10 +17,13 @@
 
   PostToolUse  result -> failure -> large_output
                PostToolUse 不短路，三者都会收到通知。
+
+  UserPromptSubmit  memory.recall_hook（结果合并注入，见 hooks.submit_user_prompt）
 """
 
 from myharness.guards import failure_guard, repeat_call_guard
 from myharness.hooks import HOOKS, register_hook
+from myharness.memory import MemoryStore
 from myharness.observability import (
     large_output_hook,
     log_hook,
@@ -30,12 +33,17 @@ from myharness.observability import (
 from myharness.security import permission_hook
 
 
-def install_default_hooks() -> None:
+def install_default_hooks(memory_store: MemoryStore | None = None) -> None:
     """注册全部内置 hook。
 
     幂等：通过检查实际注册状态判断，而不是依赖隐藏标志位 ——
     这样测试可以在 clear_hooks() 之后重新装配。
+
+    memory_store 显式传入而不是在此导入全局实例，测试可传入临时存储。
     """
+    if memory_store is not None and memory_store.recall_hook not in HOOKS["UserPromptSubmit"]:
+        register_hook("UserPromptSubmit", memory_store.recall_hook)
+
     if permission_hook in HOOKS["PreToolUse"]:
         return
 
@@ -47,5 +55,4 @@ def install_default_hooks() -> None:
     register_hook("PostToolUse", failure_guard)
     register_hook("PostToolUse", large_output_hook)
 
-    # UserPromptSubmit 暂无内置 hook；M3 的记忆检索将注册在这里
     register_hook("Stop", session_summary_hook)

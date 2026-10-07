@@ -13,6 +13,7 @@ from myharness.providers import PROVIDER_REGISTRY
 from myharness.security import init_policy
 from myharness.audit import init_audit_logger
 from myharness.bootstrap import install_default_hooks
+from myharness.memory import MemoryStore
 from myharness.skills import BUILTIN_SKILL_DIR, SkillLibrary
 
 # 仓库根目录：<repo>/myharness/config.py -> <repo>/myharness -> <repo>
@@ -34,13 +35,18 @@ SESSION_DIR.mkdir(parents=True, exist_ok=True)
 # 审计日志文件
 AUDIT_LOG = REPO_ROOT / ".myharness" / "audit.jsonl"
 
+# 长期记忆文件（跨会话共享）
+MEMORY_FILE = REPO_ROOT / ".myharness" / "memory" / "memories.json"
+
 # 初始化安全策略和审计日志
 init_policy(WORKDIR)
 init_audit_logger(AUDIT_LOG)
 
-# 装配内置 hook（权限、审计、日志、上下文、Stop）。
+memory_store = MemoryStore(MEMORY_FILE)
+
+# 装配内置 hook（权限、审计、日志、记忆检索、Stop）。
 # 必须在上面的 init_* 之后，因为部分 hook 依赖这些全局实例。
-install_default_hooks()
+install_default_hooks(memory_store)
 
 # Provider 配置
 PROVIDER_TYPE = os.getenv("PROVIDER", "anthropic")  # 默认使用 Anthropic

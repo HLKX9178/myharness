@@ -189,6 +189,7 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 │   ├── context.py              #   上下文压缩
 │   ├── session.py              #   会话持久化
 │   ├── skills/                 #   技能目录 + load_skill 工具；*.md 为内置技能
+│   ├── memory.py               #   长期记忆：remember 工具 + recall_hook
 │   └── ui.py                   #   终端输出样式
 │
 ├── tests/                      # 测试（**必须入库**）
@@ -262,6 +263,7 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 | `context.py` | 上下文预算与压缩 | 模型调用 |
 | `session.py` | 会话持久化 | 模型调用 |
 | `skills/` | 技能解析、目录（进 system prompt）、`load_skill` 工具 | 决定何时加载（由模型决定） |
+| `memory.py` | 记忆存储、检索、`remember` 工具、`recall_hook` | 决定记什么（由模型决定） |
 
 **跨模块功能必须落在职责所属的模块**，不得为了方便塞进 `agent.py`。
 
