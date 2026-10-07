@@ -13,6 +13,7 @@ from myharness.providers import PROVIDER_REGISTRY
 from myharness.security import init_policy
 from myharness.audit import init_audit_logger
 from myharness.bootstrap import install_default_hooks
+from myharness.skills import BUILTIN_SKILL_DIR, SkillLibrary
 
 # 仓库根目录：<repo>/myharness/config.py -> <repo>/myharness -> <repo>
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -64,4 +65,10 @@ if PROVIDER_TYPE == "anthropic" and os.getenv("ANTHROPIC_BASE_URL"):
     from anthropic import Anthropic
     provider.client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 
-SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks."
+# 技能目录启动时扫描一次，之后只读；system prompt 只含目录，不含技能全文
+skill_library = SkillLibrary([BUILTIN_SKILL_DIR])
+
+SYSTEM = "\n\n".join(filter(None, [
+    f"You are a coding agent at {WORKDIR}. Use tools to solve tasks.",
+    skill_library.catalog(),
+]))

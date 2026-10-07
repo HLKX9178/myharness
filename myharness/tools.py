@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from myharness.config import WORKDIR
+from myharness.config import WORKDIR, skill_library
 
 
 # ============================================================
@@ -188,7 +188,13 @@ def assemble_tool_pool() -> tuple[list[dict], dict[str, Callable]]:
     返回 (tools, handlers)，两者来自**同一次快照** —— 这保证模型看到的
     工具一定都有对应实现。
 
-    目前只有内置工具。M4 接入 MCP 时，在这里合并已连接 server 的工具，
+    内置工具 + 技能工具（load_skill）。M4 接入 MCP 时也在这里合并，
     agent_loop 不需要任何改动。
     """
-    return list(TOOLS), dict(TOOL_HANDLERS)
+    tools = list(TOOLS) + skill_library.tool_defs()
+    handlers = dict(TOOL_HANDLERS) | skill_library.handlers()
+
+    names = [t["name"] for t in tools]
+    if len(names) != len(set(names)) or set(names) != set(handlers):
+        raise RuntimeError(f"工具池定义与实现不一致: tools={names}, handlers={sorted(handlers)}")
+    return tools, handlers

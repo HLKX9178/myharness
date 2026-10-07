@@ -188,6 +188,7 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 │   ├── observability.py        #   日志 / 告警 / 小结 hook
 │   ├── context.py              #   上下文压缩
 │   ├── session.py              #   会话持久化
+│   ├── skills/                 #   技能目录 + load_skill 工具；*.md 为内置技能
 │   └── ui.py                   #   终端输出样式
 │
 ├── tests/                      # 测试（**必须入库**）
@@ -260,6 +261,7 @@ myharness/                      ← 仓库根：只放工具链、文档与项�
 | `observability.py` | 日志、告警、会话小结 hook | 业务逻辑 |
 | `context.py` | 上下文预算与压缩 | 模型调用 |
 | `session.py` | 会话持久化 | 模型调用 |
+| `skills/` | 技能解析、目录（进 system prompt）、`load_skill` 工具 | 决定何时加载（由模型决定） |
 
 **跨模块功能必须落在职责所属的模块**，不得为了方便塞进 `agent.py`。
 
