@@ -314,8 +314,136 @@ Return [] if nothing is worth remembering. Return ONLY valid JSON, no other text
                 rebuild_memory_index(self.memory_dir)
                 print(f"[memory] 自动提取并保存 {stored} 条记忆")
 
+                # Phase 4：达到阈值后整理
+                if len(self._memories) >= CONSOLIDATION_THRESHOLD:
+                    self.consolidate_memories(provider)
+
         except (json.JSONDecodeError, OSError, Exception) as exc:
             # 提取失败不影响主循环，静默忽略
+            pass
+
+    # ---- Phase 4：整理机制 ----
+
+    def consolidate_memories(self, provider: Any) -> None:
+        """合并、去重、更新记忆；失败时回滚到原文件。"""
+        if len(self._memories) < CONSOLIDATION_THRESHOLD:
+            return
+
+        print(f"[memory] 记忆达到 {len(self._memories)} 条，开始整理...")
+
+        # 构造整理 prompt
+        catalog = []
+        for i, mem in enumerate(self._memories):
+            catalog.append(
+                f"{i}. [{mem['type']}] {mem['name'][:50]}: {mem['body'][:200]}"
+            )
+
+        consolidation_prompt = f"""Consolidate these {len(self._memories)} memory records. Remove duplicates, merge similar entries, and drop outdated facts.
+
+Current memories:
+{chr(10).join(catalog)}
+
+Return a JSON array of consolidated memories. Each must have:
+- name: short title (max 60 chars)
+- description: one-line summary (max 100 chars)
+- type: user | feedback | project | reference
+- body: full content (max {MAX_MEMORY_CHARS} chars)
+
+Keep memories independent and self-contained. Return ONLY valid JSON, no other text."""
+
+        try:
+            response = provider.chat(
+                messages=[{"role": "user", "content": consolidation_prompt}],
+                max_tokens=4000,
+            )
+            text = "".join(
+                b.text for b in response.content if hasattr(b, "text")
+            ).strip()
+
+            # 提取 JSON
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+
+            consolidated = json.loads(text)
+            if not isinstance(consolidated, list):
+                print("[memory] 整理失败：返回格式不是数组")
+                return
+
+            # 校验每条记忆
+            valid = []
+            for record in consolidated:
+                if not all(k in record for k in ["name", "description", "type", "body"]):
+                    continue
+                if record["type"] not in VALID_TYPES:
+                    continue
+                if len(record["body"]) > MAX_MEMORY_CHARS:
+                    continue
+                valid.append(record)
+
+            if not valid:
+                print("[memory] 整理失败：没有有效的记忆")
+                return
+
+            # 保存快照
+            snapshot = {}
+            for path in self.memory_dir.glob("*.md"):
+                if path.name != "MEMORY.md":
+                    snapshot[path.name] = path.read_text(encoding="utf-8")
+
+            # 替换文件
+            try:
+                # 删除旧文件
+                for path in self.memory_dir.glob("*.md"):
+                    if path.name != "MEMORY.md":
+                        path.unlink()
+
+                # 写入新文件
+                for record in valid:
+                    slug = memory_slug(record["name"])
+                    path = self.memory_dir / f"{slug}.md"
+                    counter = 1
+                    while path.exists():
+                        path = self.memory_dir / f"{slug}-{counter}.md"
+                        counter += 1
+
+                    doc = memory_document(
+                        record["name"],
+                        record["type"],
+                        record["description"],
+                        record["body"],
+                    )
+                    path.write_text(doc, encoding="utf-8")
+
+                # 重建索引和内存
+                rebuild_memory_index(self.memory_dir)
+                self._memories = []
+                for path in sorted(self.memory_dir.glob("*.md")):
+                    if path.name == "MEMORY.md":
+                        continue
+                    try:
+                        mem = parse_memory_file(path)
+                        mem["_path"] = str(path)
+                        self._memories.append(mem)
+                    except ValueError:
+                        pass
+
+                print(f"[memory] 整理完成：{len(snapshot)} -> {len(self._memories)} 条")
+
+            except Exception as exc:
+                # 回滚
+                print(f"[memory] 整理失败，回滚: {exc}")
+                for path in self.memory_dir.glob("*.md"):
+                    if path.name != "MEMORY.md":
+                        path.unlink()
+                for filename, content in snapshot.items():
+                    (self.memory_dir / filename).write_text(content, encoding="utf-8")
+                rebuild_memory_index(self.memory_dir)
+                raise
+
+        except (json.JSONDecodeError, OSError, Exception) as exc:
+            print(f"[memory] 整理失败: {exc}")
             pass
 
     # ---- 工具：Phase 3 后移除，改为自动提取 ----
