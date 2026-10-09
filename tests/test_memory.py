@@ -1,7 +1,10 @@
 """长期记忆测试（M3 验收：跨会话可用，注入量与记忆库大小、会话长度无关）。
 
 Phase 1 重构后改为 .md 文件存储 + MEMORY.md 索引。
+Phase 3 改为 Stop hook 自动提取，移除 remember 工具。
 """
+
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +24,24 @@ from myharness.memory import (
 @pytest.fixture
 def store(tmp_path):
     return MemoryStore(tmp_path / "memory")
+
+
+@pytest.fixture
+def mock_provider():
+    """模拟 provider.chat() 返回提取结果。"""
+    class MockProvider:
+        def __init__(self):
+            self.extraction_result = []
+
+        def chat(self, messages, max_tokens=None, **kwargs):
+            # 返回预设的提取结果（必须是 JSON 格式）
+            import json
+            json_text = json.dumps(self.extraction_result)
+            return SimpleNamespace(
+                content=[SimpleNamespace(text=json_text, type="text")]
+            )
+
+    return MockProvider()
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +107,20 @@ def test_parse_rejects_invalid_type(tmp_path):
 
 def test_memory_survives_restart(tmp_path):
     dir_path = tmp_path / "memory"
-    MemoryStore(dir_path).remember("项目使用 pytest 作为测试框架", mem_type="project")
+    store = MemoryStore(dir_path)
+    # Phase 3：直接写入，不再通过 remember 工具
+    store._memories.append({
+        "name": "pytest fact",
+        "description": "pytest fact",
+        "type": "project",
+        "body": "项目使用 pytest 作为测试框架",
+        "_path": str(dir_path / "test.md"),
+    })
+    (dir_path / "test.md").write_text(
+        memory_document("pytest fact", "project", "pytest fact", "项目使用 pytest 作为测试框架"),
+        encoding="utf-8",
+    )
+    rebuild_memory_index(dir_path)
 
     reopened = MemoryStore(dir_path)
 
@@ -96,14 +130,21 @@ def test_memory_survives_restart(tmp_path):
 
 def test_md_files_and_index_are_created(tmp_path):
     dir_path = tmp_path / "memory"
-    MemoryStore(dir_path).remember("用户偏好 tabs 缩进", mem_type="user")
+    store = MemoryStore(dir_path)
+    # 直接写入测试
+    path = dir_path / "test.md"
+    path.write_text(
+        memory_document("tabs", "user", "tabs", "用户偏好 tabs 缩进"),
+        encoding="utf-8",
+    )
+    rebuild_memory_index(dir_path)
 
     files = list(dir_path.glob("*.md"))
     assert len(files) == 2  # 一个记忆文件 + MEMORY.md 索引
     assert any(f.name == "MEMORY.md" for f in files)
 
     index = (dir_path / "MEMORY.md").read_text(encoding="utf-8")
-    assert "用户偏好 tabs 缩进" in index
+    assert "tabs" in index
 
 
 def test_corrupt_file_does_not_block_startup(tmp_path):
@@ -141,7 +182,14 @@ def test_rebuild_index_after_manual_file_changes(tmp_path):
 def test_injection_bounded_regardless_of_store_size(store):
     """记忆库从 10 条增长到 1000 条，注入条数恒定不超过 RECALL_LIMIT。"""
     for i in range(50):
-        store.remember(f"deploy note number {i} about the staging server", mem_type="project")
+        # 直接写入，不通过工具
+        store._memories.append({
+            "name": f"note{i}",
+            "description": f"note{i}",
+            "type": "project",
+            "body": f"deploy note number {i} about the staging server",
+            "_path": "",
+        })
 
     injected = store.recall_hook("how do I deploy to staging")
 
@@ -150,13 +198,21 @@ def test_injection_bounded_regardless_of_store_size(store):
 
 
 def test_unrelated_query_injects_nothing(store):
-    store.remember("the staging server runs on port 8080", mem_type="reference")
+    store._memories.append({
+        "name": "port",
+        "description": "port",
+        "type": "reference",
+        "body": "the staging server runs on port 8080",
+        "_path": "",
+    })
     assert store.recall_hook("写一首诗") is None
 
 
 def test_recall_ranks_by_overlap(store):
-    store.remember("staging uses postgres", mem_type="project")
-    store.remember("staging server port is 8080 and uses nginx", mem_type="project")
+    store._memories.extend([
+        {"name": "pg", "description": "pg", "type": "project", "body": "staging uses postgres", "_path": ""},
+        {"name": "nginx", "description": "nginx", "type": "project", "body": "staging server port is 8080 and uses nginx", "_path": ""},
+    ])
 
     hits = store.search("staging nginx port")
 
@@ -164,8 +220,10 @@ def test_recall_ranks_by_overlap(store):
 
 
 def test_chinese_query_matches_chinese_memory(store):
-    store.remember("用户偏好简洁的中文回复", mem_type="user")
-    store.remember("部署脚本在 run.bat", mem_type="reference")
+    store._memories.extend([
+        {"name": "简洁", "description": "简洁", "type": "user", "body": "用户偏好简洁的中文回复", "_path": ""},
+        {"name": "部署", "description": "部署", "type": "reference", "body": "部署脚本在 run.bat", "_path": ""},
+    ])
 
     hits = store.search("回复要简洁一点")
 
@@ -174,7 +232,13 @@ def test_chinese_query_matches_chinese_memory(store):
 
 def test_recall_hook_injects_into_user_message(store):
     """端到端：hook 装配后，检索结果通过 submit_user_prompt 进入用户消息。"""
-    store.remember("the staging server port is 8080", mem_type="reference")
+    store._memories.append({
+        "name": "port",
+        "description": "port 8080",
+        "type": "reference",
+        "body": "the staging server port is 8080",
+        "_path": "",
+    })
     install_default_hooks(store)
 
     message = hooks.submit_user_prompt("what port does staging use")
@@ -191,62 +255,102 @@ def test_install_registers_recall_once(store):
 
 
 # ============================================================
-# remember 工具契约
+# Phase 3：自动提取
 # ============================================================
 
-@pytest.mark.parametrize("content", ["", "   ", "x" * (MAX_MEMORY_CHARS + 1)])
-def test_invalid_content_returns_error(store, content):
-    out = store.remember(content)
-    assert out.startswith("Error:")
+def test_should_store_memory_rejects_current_task(store):
+    candidate = {"content": "do not create files", "type": "user", "scope": "current_task"}
+    ok, reason = store.should_store_memory(candidate)
+    assert not ok
+    assert "current_task" in reason
+
+
+def test_should_store_memory_rejects_transient_expressions(store):
+    candidate = {"content": "这次不要用 spaces", "type": "user", "scope": "persistent"}
+    ok, reason = store.should_store_memory(candidate)
+    assert not ok
+    assert "transient" in reason
+
+
+def test_should_store_memory_rejects_secrets(store):
+    candidate = {"content": "api key is sk-ant-abcdefghijklmnopqrstuvwxyz1234", "type": "user", "scope": "persistent"}
+    ok, reason = store.should_store_memory(candidate)
+    assert not ok
+    assert "credential" in reason
+
+
+def test_should_store_memory_rejects_similar(store):
+    store._memories.append({
+        "name": "tabs",
+        "description": "tabs",
+        "type": "user",
+        "body": "user prefers tabs for indentation",
+        "_path": "",
+    })
+    candidate = {"content": "user prefers tabs indentation", "type": "user", "scope": "persistent"}
+    ok, reason = store.should_store_memory(candidate)
+    assert not ok
+    assert "similar" in reason
+
+
+def test_should_store_memory_accepts_valid(store):
+    candidate = {
+        "content": "项目使用 Conventional Commits 格式",
+        "type": "project",
+        "scope": "persistent",
+    }
+    ok, reason = store.should_store_memory(candidate)
+    assert ok
+    assert reason == ""
+
+
+def test_extract_memories_hook_writes_to_disk(store, mock_provider):
+    mock_provider.extraction_result = [
+        {"content": "user prefers tabs", "type": "user", "scope": "persistent"}
+    ]
+
+    messages = [
+        {"role": "user", "content": "I prefer tabs for indentation. Remember that."},
+        {"role": "assistant", "content": "OK"},
+    ]
+
+    store.extract_memories_hook(messages, mock_provider)
+
+    assert len(store) == 1
+    assert "tabs" in store._memories[0]["body"]
+    files = list(store.memory_dir.glob("*.md"))
+    assert len(files) == 2  # 记忆文件 + 索引
+
+
+def test_extract_memories_hook_skips_current_task(store, mock_provider):
+    mock_provider.extraction_result = [
+        {"content": "this time use spaces", "type": "user", "scope": "current_task"}
+    ]
+
+    messages = [
+        {"role": "user", "content": "use spaces this time"},
+        {"role": "assistant", "content": "OK"},
+    ]
+
+    store.extract_memories_hook(messages, mock_provider)
+
     assert len(store) == 0
 
 
-@pytest.mark.parametrize("secret", [
-    "the key is sk-ant-abcdefghijklmnopqrstuvwxyz",
-    "password: hunter2hunter2",
-    "AKIAABCDEFGHIJKLMNOP",
-])
-def test_secrets_are_refused(store, secret):
-    """契约 5 的延伸：密钥不得经由记忆落盘。"""
-    out = store.remember(secret)
-    assert out.startswith("Error:")
+def test_extract_memories_hook_handles_json_parse_error(store, mock_provider):
+    mock_provider.extraction_result = "not json"
+
+    messages = [
+        {"role": "user", "content": "test"},
+        {"role": "assistant", "content": "OK"},
+    ]
+
+    # 不抛异常，静默忽略
+    store.extract_memories_hook(messages, None)
     assert len(store) == 0
 
 
-def test_invalid_type_returns_error(store):
-    out = store.remember("fact", mem_type="invalid")
-    assert out.startswith("Error:")
-    assert "type" in out
-
-
-def test_duplicate_is_idempotent(store):
-    store.remember("fact", mem_type="user")
-    out = store.remember("  fact  ", mem_type="user")
-    assert not out.startswith("Error:")
-    assert len(store) == 1
-
-
-def test_tool_defs_and_handlers_match(store):
-    assert {d["name"] for d in store.tool_defs()} == set(store.handlers()) == {"remember"}
-    schema = store.tool_defs()[0]["input_schema"]
-    assert "type" in schema["properties"]
-    assert set(schema["properties"]["type"]["enum"]) == {"user", "feedback", "project", "reference"}
-
-
-def test_type_parameter_is_optional(store):
-    """type 参数可选，默认 user。"""
-    out = store.remember("user preference")
-    assert not out.startswith("Error:")
-    assert len(store) == 1
-    assert store._memories[0]["type"] == "user"
-
-
-def test_different_types_are_preserved(store):
-    store.remember("user fact", mem_type="user")
-    store.remember("feedback fact", mem_type="feedback")
-    store.remember("project fact", mem_type="project")
-    store.remember("reference fact", mem_type="reference")
-
-    assert len(store) == 4
-    types = {m["type"] for m in store._memories}
-    assert types == {"user", "feedback", "project", "reference"}
+def test_tools_no_longer_include_remember(store):
+    """Phase 3：remember 工具已移除，改为自动提取。"""
+    assert store.tool_defs() == []
+    assert store.handlers() == {}

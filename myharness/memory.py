@@ -4,7 +4,7 @@
 
   - 存储：`.memory/` 目录，每条记忆一个 `.md` 文件 + `MEMORY.md` 索引
   - 召回：关键词匹配检索 top-k 条，注入用户消息（Phase 2 可改为模型选择）
-  - 提取：Phase 3 将改为 Stop hook 自动触发，Phase 1 暂时保留 remember 工具
+  - 提取：Stop hook 自动触发，模型返回候选，Harness 校验后写入（Phase 3）
   - 整理：达到 20 条后自动合并（Phase 4 实现）
 
 记忆类型（s09）：
@@ -15,12 +15,13 @@
   - reference: 外部资料或查找线索
 """
 
+import json
 import os
 import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 RECALL_LIMIT = 3
 MAX_MEMORY_CHARS = 500
@@ -31,6 +32,10 @@ _CJK_RUN = re.compile(r"[一-鿿]+")
 _SECRET = re.compile(
     r"(sk-[A-Za-z0-9_\-]{16,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|(api[_-]?key|secret|password|token)\s*[:=]\s*\S{8,})",
+    re.IGNORECASE,
+)
+_TRANSIENT = re.compile(
+    r"(本次|这次|当前|此次|现在|今天|this session|current task|this time|right now|today)",
     re.IGNORECASE,
 )
 
@@ -163,90 +168,161 @@ class MemoryStore:
             lines.append(f"- [{mem['type']}] {mem['description']}")
         return "\n".join(lines)
 
-    # ---- 工具：定义与实现相邻（契约 3）----
+    # ---- Hook：Stop（Phase 3 自动提取）----
 
-    def remember(self, content: str, mem_type: str = "user") -> str:
-        """保存一条记忆；校验失败返回 Error 字符串。"""
-        try:
-            text = " ".join(str(content).split())
-            if not text:
-                return "Error: content is empty. Provide one self-contained fact to remember."
-            if len(text) > MAX_MEMORY_CHARS:
-                return (
-                    f"Error: content is {len(text)} chars, limit is {MAX_MEMORY_CHARS}. "
-                    f"Condense it to the single fact worth keeping."
-                )
-            if _SECRET.search(text):
-                return "Error: content looks like a credential. Secrets must not be stored in memory."
-            if mem_type not in VALID_TYPES:
-                return f"Error: type must be one of {VALID_TYPES}, got {mem_type!r}."
+    def should_store_memory(self, candidate: dict[str, Any]) -> tuple[bool, str]:
+        """校验候选记忆；返回 (是否通过, 拒绝原因)。"""
+        content = candidate.get("content", "")
+        mem_type = candidate.get("type", "")
+        scope = candidate.get("scope", "")
 
-            # 检查重复
+        # 字段完整性
+        if not content or not mem_type or not scope:
+            return False, "missing required fields (content, type, scope)"
+        if mem_type not in VALID_TYPES:
+            return False, f"invalid type {mem_type!r}"
+        if scope not in {"persistent", "current_task"}:
+            return False, f"invalid scope {scope!r}"
+
+        # scope 检查
+        if scope == "current_task":
+            return False, "scope is current_task, not persistent"
+
+        # 内容校验
+        text = " ".join(str(content).split())
+        if not text:
+            return False, "content is empty"
+        if len(text) > MAX_MEMORY_CHARS:
+            return False, f"content exceeds {MAX_MEMORY_CHARS} chars"
+        if _SECRET.search(text):
+            return False, "content looks like a credential"
+        if _TRANSIENT.search(text):
+            return False, "content contains transient expressions"
+
+        # 重复检查：完全相同
+        for mem in self._memories:
+            if mem["body"] == text:
+                return False, "identical memory already exists"
+
+        # 高度相似检查（>80% 词重叠）
+        candidate_tokens = _tokens(text)
+        if candidate_tokens:
             for mem in self._memories:
-                if mem["body"] == text:
-                    return "Already remembered (identical memory exists)."
+                existing_tokens = _tokens(mem["body"])
+                if not existing_tokens:
+                    continue
+                overlap = len(candidate_tokens & existing_tokens)
+                similarity = overlap / min(len(candidate_tokens), len(existing_tokens))
+                if similarity > 0.8:
+                    return False, f"too similar to existing memory {mem['name'][:30]}"
 
-            # 生成 name 和 description（简化：取前 60 字符）
-            name = text[:60]
-            description = text[:100]
+        return True, ""
 
-            # 写入 .md 文件
-            slug = memory_slug(name)
-            path = self.memory_dir / f"{slug}.md"
-            counter = 1
-            while path.exists():
-                path = self.memory_dir / f"{slug}-{counter}.md"
-                counter += 1
+    def extract_memories_hook(self, messages: list, provider: Any = None) -> None:
+        """Stop hook：提取本轮对话中值得保存的记忆。
 
-            doc = memory_document(name, mem_type, description, text)
-            path.write_text(doc, encoding="utf-8")
+        provider 由 bootstrap 传入，避免循环导入 config.provider。
+        """
+        if provider is None:
+            return  # 测试时可能没有传 provider
 
-            # 更新内存
-            self._memories.append({
-                "name": name,
-                "description": description,
-                "type": mem_type,
-                "body": text,
-                "_path": str(path),
-            })
+        # 只看最近的对话（最多 10 条消息或最近 5 轮）
+        recent = messages[-10:]
+        if len(recent) < 2:
+            return  # 对话太短，没什么可提取
 
-            # 重建索引
-            rebuild_memory_index(self.memory_dir)
+        # 构造提取 prompt
+        conversation = []
+        for msg in recent:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                conversation.append(f"{role}: {content[:200]}")
+            elif isinstance(content, list):
+                text_blocks = [b.text for b in content if hasattr(b, "text")]
+                if text_blocks:
+                    conversation.append(f"{role}: {text_blocks[0][:200]}")
 
-            return f"Remembered. Store now holds {len(self._memories)} memories."
-        except OSError as exc:
-            return f"Error: failed to write memory file: {exc}"
+        extraction_prompt = f"""Extract durable facts from this conversation that should be remembered for future sessions.
+
+Conversation:
+{chr(10).join(conversation)}
+
+Return a JSON array of memory candidates. Each must have:
+- content: one self-contained fact (max {MAX_MEMORY_CHARS} chars)
+- type: user | feedback | project | reference
+- scope: persistent | current_task
+
+Only extract facts that apply to FUTURE sessions (scope: persistent). Do NOT extract:
+- Transient commands ("this time", "for now", "in this session")
+- Things derivable from code
+- Temporary paths or one-time tasks
+
+Return [] if nothing is worth remembering. Return ONLY valid JSON, no other text."""
+
+        try:
+            response = provider.chat(
+                messages=[{"role": "user", "content": extraction_prompt}],
+                max_tokens=1000,
+            )
+            text = "".join(
+                b.text for b in response.content if hasattr(b, "text")
+            ).strip()
+
+            # 提取 JSON（可能被包在 ```json ... ``` 里）
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+
+            candidates = json.loads(text)
+            if not isinstance(candidates, list):
+                return
+
+            stored = 0
+            for candidate in candidates:
+                ok, reason = self.should_store_memory(candidate)
+                if not ok:
+                    continue
+
+                # 写入记忆
+                content = candidate["content"]
+                mem_type = candidate["type"]
+                name = content[:60]
+                description = content[:100]
+
+                slug = memory_slug(name)
+                path = self.memory_dir / f"{slug}.md"
+                counter = 1
+                while path.exists():
+                    path = self.memory_dir / f"{slug}-{counter}.md"
+                    counter += 1
+
+                doc = memory_document(name, mem_type, description, content)
+                path.write_text(doc, encoding="utf-8")
+
+                self._memories.append({
+                    "name": name,
+                    "description": description,
+                    "type": mem_type,
+                    "body": content,
+                    "_path": str(path),
+                })
+                stored += 1
+
+            if stored > 0:
+                rebuild_memory_index(self.memory_dir)
+                print(f"[memory] 自动提取并保存 {stored} 条记忆")
+
+        except (json.JSONDecodeError, OSError, Exception) as exc:
+            # 提取失败不影响主循环，静默忽略
+            pass
+
+    # ---- 工具：Phase 3 后移除，改为自动提取 ----
 
     def tool_defs(self) -> list[dict]:
-        return [{
-            "name": "remember",
-            "description": (
-                "Save one durable fact to long-term memory so future sessions can recall it: "
-                "user preferences, project conventions, decisions and their reasons, "
-                "non-obvious pitfalls. Do not save things derivable from the code, "
-                "transient task state, or secrets. One self-contained fact per call. "
-                "Recall is keyword-based: write the fact in the user's language and "
-                "keep the exact key terms the user used, or it will not be found later."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": f"The fact, max {MAX_MEMORY_CHARS} chars",
-                    },
-                    "type": {
-                        "type": "string",
-                        "enum": list(VALID_TYPES),
-                        "description": (
-                            "user: long-term preference | feedback: reusable work guidance | "
-                            "project: stable project fact | reference: external resource pointer"
-                        ),
-                    },
-                },
-                "required": ["content"],
-            },
-        }]
+        # Phase 3：移除 remember 工具，改为 Stop hook 自动提取
+        return []
 
     def handlers(self) -> dict[str, Callable[..., str]]:
-        return {"remember": self.remember}
+        return {}

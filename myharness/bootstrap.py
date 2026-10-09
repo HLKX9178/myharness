@@ -33,13 +33,14 @@ from myharness.observability import (
 from myharness.security import permission_hook
 
 
-def install_default_hooks(memory_store: MemoryStore | None = None) -> None:
+def install_default_hooks(memory_store: MemoryStore | None = None, provider=None) -> None:
     """注册全部内置 hook。
 
     幂等：通过检查实际注册状态判断，而不是依赖隐藏标志位 ——
     这样测试可以在 clear_hooks() 之后重新装配。
 
     memory_store 显式传入而不是在此导入全局实例，测试可传入临时存储。
+    provider 用于 extract_memories_hook，需要调用模型提取记忆。
     """
     if memory_store is not None and memory_store.recall_hook not in HOOKS["UserPromptSubmit"]:
         register_hook("UserPromptSubmit", memory_store.recall_hook)
@@ -56,3 +57,10 @@ def install_default_hooks(memory_store: MemoryStore | None = None) -> None:
     register_hook("PostToolUse", large_output_hook)
 
     register_hook("Stop", session_summary_hook)
+
+    # Phase 3：自动提取记忆
+    if memory_store is not None and provider is not None:
+        # 用 lambda 绑定 provider，避免在 hook 里导入 config
+        extract_hook = lambda messages: memory_store.extract_memories_hook(messages, provider)
+        if extract_hook not in HOOKS["Stop"]:
+            register_hook("Stop", extract_hook)

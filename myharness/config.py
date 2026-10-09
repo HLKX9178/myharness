@@ -44,11 +44,7 @@ init_audit_logger(AUDIT_LOG)
 
 memory_store = MemoryStore(MEMORY_DIR)
 
-# 装配内置 hook（权限、审计、日志、记忆检索、Stop）。
-# 必须在上面的 init_* 之后，因为部分 hook 依赖这些全局实例。
-install_default_hooks(memory_store)
-
-# Provider 配置
+# Provider 配置（必须在 install_default_hooks 之前，因为提取 hook 需要 provider）
 PROVIDER_TYPE = os.getenv("PROVIDER", "anthropic")  # 默认使用 Anthropic
 MODEL = os.environ["MODEL_ID"]
 
@@ -70,6 +66,10 @@ provider = ProviderClass(
 if PROVIDER_TYPE == "anthropic" and os.getenv("ANTHROPIC_BASE_URL"):
     from anthropic import Anthropic
     provider.client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+
+# 装配内置 hook（权限、审计、日志、记忆检索、Stop、自动提取记忆）。
+# 必须在 provider 之后，因为 extract_memories_hook 需要调用模型。
+install_default_hooks(memory_store, provider)
 
 # 技能目录启动时扫描一次，之后只读；system prompt 只含目录，不含技能全文
 skill_library = SkillLibrary([BUILTIN_SKILL_DIR])
