@@ -231,27 +231,57 @@ def test_chinese_query_matches_chinese_memory(store):
 
 
 def test_recall_hook_injects_into_user_message(store):
-    """端到端：hook 装配后，检索结果通过 submit_user_prompt 进入用户消息。"""
-    store._memories.append({
-        "name": "port",
-        "description": "port 8080",
-        "type": "reference",
-        "body": "the staging server port is 8080",
-        "_path": "",
-    })
-    install_default_hooks(store)
-
-    message = hooks.submit_user_prompt("what port does staging use")
-
-    assert message.startswith("<context>")
-    assert "8080" in message or "staging" in message
-    assert message.endswith("what port does staging use")
+    """Phase 5 已移除：记忆现在通过 system prompt 加载，不再注入 user message。"""
+    # 该测试不再适用，但保留以记录行为变更
+    pass
 
 
 def test_install_registers_recall_once(store):
+    """Phase 5 已移除：recall_hook 不再注册到 UserPromptSubmit。"""
     install_default_hooks(store)
-    install_default_hooks(store)
-    assert hooks.registered_hooks("UserPromptSubmit").count(store.recall_hook) == 1
+    # UserPromptSubmit 应该为空
+    assert len(hooks.registered_hooks("UserPromptSubmit")) == 0
+
+
+# ============================================================
+# Phase 5：注入优化（记忆进 system prompt）
+# ============================================================
+
+def test_build_system_prompt_includes_memories(tmp_path):
+    """Phase 5：根据查询动态构建 system prompt，包含相关记忆。"""
+    from myharness.config import build_system_prompt
+    from myharness.memory import MemoryStore
+
+    store = MemoryStore(tmp_path / "memory")
+    store._memories.append({
+        "name": "tabs",
+        "description": "user prefers tabs",
+        "type": "user",
+        "body": "user prefers tabs for indentation",
+        "_path": "",
+    })
+
+    # 用临时 store 替换全局 memory_store
+    import myharness.config as config_module
+    original_store = config_module.memory_store
+    config_module.memory_store = store
+
+    try:
+        prompt = build_system_prompt("what indentation style")
+        assert "Long-term Memory" in prompt
+        assert "tabs" in prompt
+        assert "for reference only" in prompt
+        assert "if they conflict with the current request" in prompt
+    finally:
+        config_module.memory_store = original_store
+
+
+def test_build_system_prompt_without_query_omits_memories(tmp_path):
+    """没有查询时，不注入记忆。"""
+    from myharness.config import build_system_prompt
+
+    prompt = build_system_prompt("")
+    assert "Long-term Memory" not in prompt
 
 
 # ============================================================

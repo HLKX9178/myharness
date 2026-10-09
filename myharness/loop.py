@@ -17,7 +17,7 @@
   - 清空守卫跨轮状态             对话轮次的边界在本函数上
 """
 
-from myharness.config import SYSTEM, provider
+from myharness.config import build_system_prompt, provider
 from myharness.context import ContextManager
 from myharness.dispatch import execute_tool
 from myharness.guards import failure_guard, reset_turn_state
@@ -39,6 +39,18 @@ def agent_loop(messages: list) -> None:
 
     total_tokens = 0
 
+    # Phase 5：提取用户查询，用于构建动态 system prompt
+    user_query = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                user_query = content
+                break
+
+    # 构建包含相关记忆的 system prompt
+    system_prompt = build_system_prompt(user_query)
+
     for turn in range(MAX_TURNS):
         # 压缩上下文（如果需要）
         if context_manager.should_compress(messages):
@@ -52,7 +64,7 @@ def agent_loop(messages: list) -> None:
         response = provider.chat(
             messages=messages,
             tools=tools,
-            system=SYSTEM,
+            system=system_prompt,
             max_tokens=2000,
         )
         messages.append({"role": "assistant", "content": response.content})

@@ -18,7 +18,7 @@
   PostToolUse  result -> failure -> large_output
                PostToolUse 不短路，三者都会收到通知。
 
-  UserPromptSubmit  memory.recall_hook（结果合并注入，见 hooks.submit_user_prompt）
+  UserPromptSubmit  (Phase 5: 不再注入，记忆通过 system prompt 加载)
 """
 
 from myharness.guards import failure_guard, repeat_call_guard
@@ -42,8 +42,9 @@ def install_default_hooks(memory_store: MemoryStore | None = None, provider=None
     memory_store 显式传入而不是在此导入全局实例，测试可传入临时存储。
     provider 用于 extract_memories_hook，需要调用模型提取记忆。
     """
-    if memory_store is not None and memory_store.recall_hook not in HOOKS["UserPromptSubmit"]:
-        register_hook("UserPromptSubmit", memory_store.recall_hook)
+    # Phase 5：recall_hook 不再需要，记忆通过 system prompt 注入
+    # if memory_store is not None and memory_store.recall_hook not in HOOKS["UserPromptSubmit"]:
+    #     register_hook("UserPromptSubmit", memory_store.recall_hook)
 
     if permission_hook in HOOKS["PreToolUse"]:
         return

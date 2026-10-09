@@ -13,7 +13,7 @@ from myharness.providers import PROVIDER_REGISTRY
 from myharness.security import init_policy
 from myharness.audit import init_audit_logger
 from myharness.bootstrap import install_default_hooks
-from myharness.memory import MemoryStore
+from myharness.memory import RECALL_LIMIT, MemoryStore
 from myharness.skills import BUILTIN_SKILL_DIR, SkillLibrary
 
 # 仓库根目录：<repo>/myharness/config.py -> <repo>/myharness -> <repo>
@@ -74,7 +74,28 @@ install_default_hooks(memory_store, provider)
 # 技能目录启动时扫描一次，之后只读；system prompt 只含目录，不含技能全文
 skill_library = SkillLibrary([BUILTIN_SKILL_DIR])
 
-SYSTEM = "\n\n".join(filter(None, [
-    f"You are a coding agent at {WORKDIR}. Use tools to solve tasks.",
-    skill_library.catalog(),
-]))
+# Phase 5：system prompt 改为动态函数，根据用户查询注入记忆
+def build_system_prompt(user_query: str = "") -> str:
+    """构建 system prompt，可选注入相关记忆。"""
+    base = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks."
+
+    parts = [base, skill_library.catalog()]
+
+    # 召回相关记忆
+    if user_query:
+        memories = memory_store.search(user_query, limit=RECALL_LIMIT)
+        if memories:
+            mem_lines = [
+                "## Long-term Memory",
+                "The following facts were saved in previous sessions. "
+                "They are for reference only — if they conflict with the current request, "
+                "follow the current request.",
+            ]
+            for mem in memories:
+                mem_lines.append(f"- [{mem['type']}] {mem['description']}")
+            parts.append("\n".join(mem_lines))
+
+    return "\n\n".join(filter(None, parts))
+
+# 向后兼容：默认 system prompt 不含记忆
+SYSTEM = build_system_prompt()
