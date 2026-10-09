@@ -1,29 +1,30 @@
 """长期记忆：跨会话保存模型认为值得记住的事实。
 
-职责划分：
+参考 s09 教程重构：
 
-  - 写入：由模型决定。模型调用 remember(content)，Harness 只负责校验与落盘。
-  - 读取：由 Harness 决定。recall_hook 挂在 UserPromptSubmit 上，按关键词
-    检索 top-k 条注入本轮用户消息。
+  - 存储：`.memory/` 目录，每条记忆一个 `.md` 文件 + `MEMORY.md` 索引
+  - 召回：关键词匹配检索 top-k 条，注入用户消息（Phase 2 可改为模型选择）
+  - 提取：Phase 3 将改为 Stop hook 自动触发，Phase 1 暂时保留 remember 工具
+  - 整理：达到 20 条后自动合并（Phase 4 实现）
 
-注入量有硬上限（RECALL_LIMIT 条 × MAX_MEMORY_CHARS 字符），
-与记忆库大小、会话长度都无关（M3 验收）。
+记忆类型（s09）：
 
-检索是确定性的词重叠打分：ASCII 单词 + 中文字符二元组。不引入向量库依赖；
-代价是同义词召回不到，这是已知边界。
+  - user: 用户的长期偏好
+  - feedback: 以后仍适用的工作反馈
+  - project: 稳定的项目事实
+  - reference: 外部资料或查找线索
 """
 
-import json
 import os
 import re
 import tempfile
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 RECALL_LIMIT = 3
 MAX_MEMORY_CHARS = 500
+CONSOLIDATION_THRESHOLD = 20
 
 _ASCII_WORD = re.compile(r"[a-z0-9_]{2,}")
 _CJK_RUN = re.compile(r"[一-鿿]+")
@@ -33,8 +34,11 @@ _SECRET = re.compile(
     re.IGNORECASE,
 )
 
+VALID_TYPES = {"user", "feedback", "project", "reference"}
+
 
 def _tokens(text: str) -> set[str]:
+    """提取文本中的关键词：ASCII 单词 + 中文二元组。"""
     lowered = text.lower()
     tokens = set(_ASCII_WORD.findall(lowered))
     for run in _CJK_RUN.findall(lowered):
@@ -44,35 +48,92 @@ def _tokens(text: str) -> set[str]:
     return tokens
 
 
-class MemoryStore:
-    """JSON 文件存储。每次写入整体原子替换，进程中途被杀也不会留下半个文件。"""
+def memory_slug(name: str) -> str:
+    """name -> 文件名前缀（kebab-case，ASCII-safe）。"""
+    slug = re.sub(r"[^\w\s-]", "", name.lower())
+    slug = re.sub(r"[\s_]+", "-", slug).strip("-")
+    return slug[:64] or "memory"
 
-    def __init__(self, path: Path):
-        self.path = path
+
+def memory_document(name: str, mem_type: str, description: str, body: str) -> str:
+    """生成带 frontmatter 的 Markdown 文档。"""
+    return f"---\nname: {name}\ndescription: {description}\ntype: {mem_type}\n---\n\n{body}\n"
+
+
+def parse_memory_file(path: Path) -> dict[str, str]:
+    """解析 .md 文件，返回 {name, description, type, body}；格式错误抛 ValueError。"""
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(f"记忆文件 {path} 缺少 frontmatter")
+
+    try:
+        end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    except StopIteration:
+        raise ValueError(f"记忆文件 {path} 的 frontmatter 没有结束") from None
+
+    meta: dict[str, str] = {}
+    for line in lines[1:end]:
+        if not line.strip():
+            continue
+        key, sep, value = line.partition(":")
+        if not sep:
+            raise ValueError(f"记忆文件 {path} frontmatter 格式错误：{line!r}")
+        meta[key.strip()] = value.strip()
+
+    name = meta.get("name", "")
+    description = meta.get("description", "")
+    mem_type = meta.get("type", "")
+    body = "\n".join(lines[end + 1:]).strip()
+
+    if not name or not description or not mem_type:
+        raise ValueError(f"记忆文件 {path} 必须提供 name、description 和 type")
+    if mem_type not in VALID_TYPES:
+        raise ValueError(f"记忆文件 {path} 的 type 必须是 {VALID_TYPES} 之一，实际是 {mem_type!r}")
+    if not body:
+        raise ValueError(f"记忆文件 {path} 正文为空")
+    return {"name": name, "description": description, "type": mem_type, "body": body}
+
+
+def rebuild_memory_index(memory_dir: Path) -> None:
+    """扫描 .md 文件，重新生成 MEMORY.md 索引。"""
+    index_path = memory_dir / "MEMORY.md"
+    lines = ["# Memory Index\n"]
+    for path in sorted(memory_dir.glob("*.md")):
+        if path.name == "MEMORY.md":
+            continue
+        try:
+            mem = parse_memory_file(path)
+            lines.append(f"- [{mem['name']}]({path.name}) — {mem['description']}\n")
+        except ValueError:
+            lines.append(f"- [⚠️ {path.name}](path.name) — (parse error)\n")
+    index_path.write_text("".join(lines), encoding="utf-8")
+
+
+class MemoryStore:
+    """.memory/ 目录存储，每条记忆一个 .md 文件。"""
+
+    def __init__(self, memory_dir: Path):
+        self.memory_dir = memory_dir
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
         self._memories: list[dict[str, str]] = self._load()
 
     def _load(self) -> list[dict[str, str]]:
-        if not self.path.exists():
-            return []
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"记忆文件 {self.path} 已损坏（{exc}）；请修复或移走该文件后重启"
-            ) from exc
-        return list(data.get("memories", []))
-
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps({"memories": self._memories}, ensure_ascii=False, indent=2)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(payload)
-            os.replace(tmp, self.path)
-        except OSError:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        """扫描 .md 文件加载全部记忆；损坏的文件跳过并在索引中标注。"""
+        memories = []
+        for path in sorted(self.memory_dir.glob("*.md")):
+            if path.name == "MEMORY.md":
+                continue
+            try:
+                mem = parse_memory_file(path)
+                mem["_path"] = str(path)
+                memories.append(mem)
+            except ValueError as exc:
+                # 不让一个坏文件阻止启动，但记录到索引里
+                print(f"[warn] 跳过损坏的记忆文件 {path}: {exc}")
+        if memories or any(self.memory_dir.glob("*.md")):
+            rebuild_memory_index(self.memory_dir)
+        return memories
 
     def __len__(self) -> int:
         return len(self._memories)
@@ -84,7 +145,8 @@ class MemoryStore:
             return []
         scored = []
         for index, memory in enumerate(self._memories):
-            score = len(query_tokens & _tokens(memory["content"]))
+            text = f"{memory['name']} {memory['description']} {memory['body']}"
+            score = len(query_tokens & _tokens(text))
             if score:
                 scored.append((score, index, memory))
         scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
@@ -97,12 +159,13 @@ class MemoryStore:
         if not hits:
             return None
         lines = ["Relevant long-term memories (may be outdated; verify before relying on them):"]
-        lines += [f"- [{m['created_at'][:10]}] {m['content']}" for m in hits]
+        for mem in hits:
+            lines.append(f"- [{mem['type']}] {mem['description']}")
         return "\n".join(lines)
 
     # ---- 工具：定义与实现相邻（契约 3）----
 
-    def remember(self, content: str) -> str:
+    def remember(self, content: str, mem_type: str = "user") -> str:
         """保存一条记忆；校验失败返回 Error 字符串。"""
         try:
             text = " ".join(str(content).split())
@@ -115,18 +178,44 @@ class MemoryStore:
                 )
             if _SECRET.search(text):
                 return "Error: content looks like a credential. Secrets must not be stored in memory."
-            if any(m["content"] == text for m in self._memories):
-                return "Already remembered (identical memory exists)."
+            if mem_type not in VALID_TYPES:
+                return f"Error: type must be one of {VALID_TYPES}, got {mem_type!r}."
 
+            # 检查重复
+            for mem in self._memories:
+                if mem["body"] == text:
+                    return "Already remembered (identical memory exists)."
+
+            # 生成 name 和 description（简化：取前 60 字符）
+            name = text[:60]
+            description = text[:100]
+
+            # 写入 .md 文件
+            slug = memory_slug(name)
+            path = self.memory_dir / f"{slug}.md"
+            counter = 1
+            while path.exists():
+                path = self.memory_dir / f"{slug}-{counter}.md"
+                counter += 1
+
+            doc = memory_document(name, mem_type, description, text)
+            path.write_text(doc, encoding="utf-8")
+
+            # 更新内存
             self._memories.append({
-                "id": f"mem_{uuid.uuid4().hex[:8]}",
-                "content": text,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "name": name,
+                "description": description,
+                "type": mem_type,
+                "body": text,
+                "_path": str(path),
             })
-            self._save()
+
+            # 重建索引
+            rebuild_memory_index(self.memory_dir)
+
             return f"Remembered. Store now holds {len(self._memories)} memories."
         except OSError as exc:
-            return f"Error: failed to write memory file {self.path}: {exc}"
+            return f"Error: failed to write memory file: {exc}"
 
     def tool_defs(self) -> list[dict]:
         return [{
@@ -145,6 +234,14 @@ class MemoryStore:
                     "content": {
                         "type": "string",
                         "description": f"The fact, max {MAX_MEMORY_CHARS} chars",
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": list(VALID_TYPES),
+                        "description": (
+                            "user: long-term preference | feedback: reusable work guidance | "
+                            "project: stable project fact | reference: external resource pointer"
+                        ),
                     },
                 },
                 "required": ["content"],
