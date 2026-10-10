@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Callable
 
 from myharness.config import WORKDIR, memory_store, skill_library
+from myharness.mcp.registry import get_registry
+from myharness.mcp.mock_servers import MOCK_SERVERS
 
 
 # ============================================================
@@ -103,6 +105,33 @@ def run_glob(pattern: str) -> str:
     return "\n".join(shown) if shown else "(no matches)"
 
 
+def connect_mcp(name: str) -> str:
+    """连接 MCP server（模型可调用的工具）。"""
+    if name not in MOCK_SERVERS:
+        available = ", ".join(MOCK_SERVERS.keys())
+        return f"Error: Unknown server '{name}'. Available: {available}"
+
+    registry = get_registry()
+    if name in registry.clients:
+        return f"MCP server '{name}' already connected"
+
+    try:
+        # 创建 mock server
+        factory = MOCK_SERVERS[name]
+        client = factory()
+
+        # 添加到注册表
+        registry.add_client(client)
+
+        tool_names = ", ".join(tool["name"] for tool in client.tools)
+        return (
+            f"Connected to MCP server '{name}'. "
+            f"Discovered {len(client.tools)} tools: {tool_names}"
+        )
+    except Exception as exc:
+        return f"Error: {type(exc).__name__}: {exc}"
+
+
 # ============================================================
 # 定义（给模型看的说明书）
 # ============================================================
@@ -166,6 +195,21 @@ TOOLS = [
             "required": ["pattern"],
         },
     },
+    {
+        "name": "connect_mcp",
+        "description": "Connect to an MCP server to access its tools. Available: docs, deploy.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Server name",
+                    "enum": list(MOCK_SERVERS.keys()),
+                },
+            },
+            "required": ["name"],
+        },
+    },
 ]
 
 # 实现：工具名 -> 函数。必须与 TOOLS 一一对应。
@@ -175,6 +219,7 @@ TOOL_HANDLERS = {
     "edit_file": edit_file,
     "write_file": write_file,
     "glob_files": run_glob,
+    "connect_mcp": connect_mcp,
 }
 
 
@@ -188,13 +233,36 @@ def assemble_tool_pool() -> tuple[list[dict], dict[str, Callable]]:
     返回 (tools, handlers)，两者来自**同一次快照** —— 这保证模型看到的
     工具一定都有对应实现。
 
-    内置工具 + 技能工具（load_skill）+ 记忆工具（remember）。
-    M4 接入 MCP 时也在这里合并，agent_loop 不需要任何改动。
+    内置工具 + 技能工具（load_skill）+ 记忆工具（remember）+ MCP 工具。
     """
-    tools = list(TOOLS) + skill_library.tool_defs() + memory_store.tool_defs()
-    handlers = dict(TOOL_HANDLERS) | skill_library.handlers() | memory_store.handlers()
+    # 1. 内置工具
+    builtin_tools = list(TOOLS)
+    builtin_handlers = dict(TOOL_HANDLERS)
 
+    # 2. 技能工具
+    builtin_tools.extend(skill_library.tool_defs())
+    builtin_handlers.update(skill_library.handlers())
+
+    # 3. 记忆工具
+    builtin_tools.extend(memory_store.tool_defs())
+    builtin_handlers.update(memory_store.handlers())
+
+    # 4. MCP 工具（动态合并）
+    registry = get_registry()
+    try:
+        tools, handlers, _policies = registry.assemble_tool_pool(
+            builtin_tools, builtin_handlers
+        )
+    except Exception as exc:
+        # 合并失败（命名冲突、schema 非法等）直接抛出，
+        # 让调用方（agent_loop）能看到错误并中止本轮
+        raise RuntimeError(f"Failed to assemble MCP tool pool: {exc}") from exc
+
+    # 5. 一致性检查
     names = [t["name"] for t in tools]
     if len(names) != len(set(names)) or set(names) != set(handlers):
-        raise RuntimeError(f"工具池定义与实现不一致: tools={names}, handlers={sorted(handlers)}")
+        raise RuntimeError(
+            f"工具池定义与实现不一致: tools={names}, handlers={sorted(handlers)}"
+        )
+
     return tools, handlers
