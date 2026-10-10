@@ -32,8 +32,16 @@ def mock_provider():
     class MockProvider:
         def __init__(self):
             self.extraction_result = []
+            self.calls = []
 
-        def chat(self, messages, max_tokens=None, **kwargs):
+        def chat(self, messages, tools, system, max_tokens):
+            # 签名与 BaseProvider.chat 一致：漏传 tools/system 时直接抛 TypeError
+            self.calls.append({
+                "messages": messages,
+                "tools": tools,
+                "system": system,
+                "max_tokens": max_tokens,
+            })
             # 返回预设的提取结果（必须是 JSON 格式）
             import json
             json_text = json.dumps(self.extraction_result)
@@ -350,6 +358,9 @@ def test_extract_memories_hook_writes_to_disk(store, mock_provider):
     assert "tabs" in store._memories[0]["body"]
     files = list(store.memory_dir.glob("*.md"))
     assert len(files) == 2  # 记忆文件 + 索引
+    assert mock_provider.calls[0]["tools"] == []
+    assert "durable memories" in mock_provider.calls[0]["system"]
+    assert mock_provider.calls[0]["max_tokens"] == 1000
 
 
 def test_extract_memories_hook_skips_current_task(store, mock_provider):
@@ -377,6 +388,22 @@ def test_extract_memories_hook_handles_json_parse_error(store, mock_provider):
 
     # 不抛异常，静默忽略
     store.extract_memories_hook(messages, None)
+    assert len(store) == 0
+
+
+def test_extraction_failure_is_reported_not_silent(store, capsys):
+    """提取失败不能中断主循环，但必须打印原因。"""
+    class BrokenProvider:
+        def chat(self, messages, tools, system, max_tokens):
+            raise RuntimeError("upstream 500")
+
+    messages = [
+        {"role": "user", "content": "I prefer tabs"},
+        {"role": "assistant", "content": "OK"},
+    ]
+    store.extract_memories_hook(messages, BrokenProvider())
+
+    assert "upstream 500" in capsys.readouterr().out
     assert len(store) == 0
 
 

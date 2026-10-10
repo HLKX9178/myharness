@@ -263,6 +263,8 @@ Return [] if nothing is worth remembering. Return ONLY valid JSON, no other text
         try:
             response = provider.chat(
                 messages=[{"role": "user", "content": extraction_prompt}],
+                tools=[],
+                system="Extract durable memories and return only valid JSON.",
                 max_tokens=1000,
             )
             text = "".join(
@@ -318,9 +320,9 @@ Return [] if nothing is worth remembering. Return ONLY valid JSON, no other text
                 if len(self._memories) >= CONSOLIDATION_THRESHOLD:
                     self.consolidate_memories(provider)
 
-        except (json.JSONDecodeError, OSError, Exception) as exc:
-            # 提取失败不影响主循环，静默忽略
-            pass
+        except Exception as exc:
+            # Stop hook 的附加能力失败时不影响主循环，但必须留下诊断信息。
+            print(f"[memory] 自动提取失败: {exc}")
 
     # ---- Phase 4：整理机制 ----
 
@@ -354,6 +356,8 @@ Keep memories independent and self-contained. Return ONLY valid JSON, no other t
         try:
             response = provider.chat(
                 messages=[{"role": "user", "content": consolidation_prompt}],
+                tools=[],
+                system="Consolidate durable memories and return only valid JSON.",
                 max_tokens=4000,
             )
             text = "".join(
@@ -442,9 +446,8 @@ Keep memories independent and self-contained. Return ONLY valid JSON, no other t
                 rebuild_memory_index(self.memory_dir)
                 raise
 
-        except (json.JSONDecodeError, OSError, Exception) as exc:
+        except Exception as exc:
             print(f"[memory] 整理失败: {exc}")
-            pass
 
     # ---- 工具：Phase 3 后移除，改为自动提取 ----
 
