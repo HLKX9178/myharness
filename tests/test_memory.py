@@ -4,6 +4,7 @@ Phase 1 重构后改为 .md 文件存储 + MEMORY.md 索引。
 Phase 3 改为 Stop hook 自动提取，移除 remember 工具。
 """
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -34,8 +35,13 @@ def mock_provider():
             self.extraction_result = []
             self.calls = []
 
-        def chat(self, messages, tools, system, max_tokens):
-            # 签名与 BaseProvider.chat 一致：漏传 tools/system 时直接抛 TypeError
+        def chat(self, *args, **kwargs):
+            # 按真实接口校验调用方式：签名不符时这里直接抛 TypeError
+            from myharness.providers.base import BaseProvider
+            bound = inspect.signature(BaseProvider.chat).bind(self, *args, **kwargs)
+            messages, tools, system, max_tokens = (
+                bound.arguments[k] for k in ("messages", "tools", "system", "max_tokens")
+            )
             self.calls.append({
                 "messages": messages,
                 "tools": tools,
@@ -405,6 +411,31 @@ def test_extraction_failure_is_reported_not_silent(store, capsys):
 
     assert "upstream 500" in capsys.readouterr().out
     assert len(store) == 0
+
+
+def test_extraction_hook_registered_once_after_summary(store, mock_provider):
+    install_default_hooks(store, mock_provider)
+    install_default_hooks(store, mock_provider)
+
+    stop_hooks = hooks.registered_hooks("Stop")
+    extract = store.extraction_hook(mock_provider)
+    assert stop_hooks.count(extract) == 1
+    assert stop_hooks.index(extract) > 0, "提取应排在 session_summary_hook 之后"
+
+
+def test_extraction_hook_via_stop_writes_memory(store, mock_provider):
+    """端到端：经由 trigger_hooks('Stop') 触发，而不是直接调方法。"""
+    mock_provider.extraction_result = [
+        {"content": "user prefers tabs", "type": "user", "scope": "persistent"}
+    ]
+    install_default_hooks(store, mock_provider)
+
+    hooks.trigger_hooks("Stop", [
+        {"role": "user", "content": "I prefer tabs"},
+        {"role": "assistant", "content": "OK"},
+    ])
+
+    assert len(store) == 1
 
 
 def test_tools_no_longer_include_remember(store):

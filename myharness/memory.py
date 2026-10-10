@@ -16,10 +16,8 @@
 """
 
 import json
-import os
 import re
-import tempfile
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -451,9 +449,37 @@ Keep memories independent and self-contained. Return ONLY valid JSON, no other t
 
     # ---- 工具：Phase 3 后移除，改为自动提取 ----
 
+    def extraction_hook(self, provider: Any) -> "MemoryExtractionHook":
+        return MemoryExtractionHook(self, provider)
+
     def tool_defs(self) -> list[dict]:
         # Phase 3：移除 remember 工具，改为 Stop hook 自动提取
         return []
 
     def handlers(self) -> dict[str, Callable[..., str]]:
         return {}
+
+
+@dataclass(frozen=True, eq=False)
+class MemoryExtractionHook:
+    """Stop hook：把 provider 绑定到 store 上。
+
+    用具名对象而不是 lambda：同一 (store, provider) 比较相等，
+    install_default_hooks 的幂等检查才有效。
+    """
+
+    store: MemoryStore
+    provider: Any
+
+    def __call__(self, messages: list) -> None:
+        self.store.extract_memories_hook(messages, self.provider)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, MemoryExtractionHook)
+            and other.store is self.store
+            and other.provider is self.provider
+        )
+
+    def __hash__(self) -> int:
+        return hash((id(self.store), id(self.provider)))

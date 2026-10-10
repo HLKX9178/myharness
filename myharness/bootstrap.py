@@ -46,22 +46,19 @@ def install_default_hooks(memory_store: MemoryStore | None = None, provider=None
     # if memory_store is not None and memory_store.recall_hook not in HOOKS["UserPromptSubmit"]:
     #     register_hook("UserPromptSubmit", memory_store.recall_hook)
 
-    if permission_hook in HOOKS["PreToolUse"]:
-        return
+    if permission_hook not in HOOKS["PreToolUse"]:
+        register_hook("PreToolUse", permission_hook)
+        register_hook("PreToolUse", repeat_call_guard)
+        register_hook("PreToolUse", log_hook)
 
-    register_hook("PreToolUse", permission_hook)
-    register_hook("PreToolUse", repeat_call_guard)
-    register_hook("PreToolUse", log_hook)
+        register_hook("PostToolUse", result_hook)
+        register_hook("PostToolUse", failure_guard)
+        register_hook("PostToolUse", large_output_hook)
 
-    register_hook("PostToolUse", result_hook)
-    register_hook("PostToolUse", failure_guard)
-    register_hook("PostToolUse", large_output_hook)
+        register_hook("Stop", session_summary_hook)
 
-    register_hook("Stop", session_summary_hook)
-
-    # Phase 3：自动提取记忆
+    # 独立于上面的检查：记忆提取必须排在 session_summary_hook 之后
     if memory_store is not None and provider is not None:
-        # 用 lambda 绑定 provider，避免在 hook 里导入 config
-        extract_hook = lambda messages: memory_store.extract_memories_hook(messages, provider)
+        extract_hook = memory_store.extraction_hook(provider)
         if extract_hook not in HOOKS["Stop"]:
             register_hook("Stop", extract_hook)
