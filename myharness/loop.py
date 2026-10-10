@@ -17,7 +17,7 @@
   - 清空守卫跨轮状态             对话轮次的边界在本函数上
 """
 
-from myharness.config import build_system_prompt, provider
+from myharness.config import MAX_TOKENS, build_system_prompt, provider
 from myharness.context import ContextManager
 from myharness.dispatch import execute_tool
 from myharness.guards import failure_guard, reset_turn_state
@@ -26,7 +26,7 @@ from myharness.tools import assemble_tool_pool
 from myharness.ui import Color
 
 MAX_TURNS = 20  # 防止模型无限循环
-MAX_TOTAL_TOKENS = 100000  # token 上限
+MAX_TOTAL_TOKENS = 100000  # 本轮累计预算；单次请求上限见 config.MAX_TOKENS
 
 # 上下文管理器
 context_manager = ContextManager(max_messages=30)
@@ -65,7 +65,7 @@ def agent_loop(messages: list) -> None:
             messages=messages,
             tools=tools,
             system=system_prompt,
-            max_tokens=2000,
+            max_tokens=MAX_TOKENS,
         )
         messages.append({"role": "assistant", "content": response.content})
 
