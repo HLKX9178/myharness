@@ -46,10 +46,33 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         )
     return value
 
-# Agent 的工作目录。
-# 目前指向仓库根目录，方便它读取项目文档。
-# 后续会改为独立的 workspace/，避免 Agent 修改到自身源码。
-WORKDIR = REPO_ROOT
+    if value < minimum:
+        raise ValueError(
+            f"{name} must be >= {minimum}, got {value}. Fix {name} in .env."
+        )
+    return value
+
+
+def _env_dir(name: str, default: Path) -> Path:
+    """读取目录型环境变量；未设置时返回 default，非法值直接报错。
+
+    非法值不静默回退：把 WORKDIR 拼错却以为生效了，比直接报错难查得多。
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    path = Path(raw.strip()).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(
+            f"{name} must be an existing directory, got {path}. "
+            f"Create it first, or fix {name} in .env."
+        )
+    return path
+
+
+# Agent 的工作目录。默认为仓库根；设置环境变量 WORKDIR 可指向别处，
+# 用于让 Agent 在另一个项目里工作 —— 此时该目录同时成为权限边界。
+WORKDIR = _env_dir("WORKDIR", REPO_ROOT)
 
 # 会话数据目录
 SESSION_DIR = REPO_ROOT / ".myharness" / "sessions"

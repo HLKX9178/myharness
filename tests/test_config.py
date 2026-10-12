@@ -4,12 +4,22 @@
 否则「设了却没生效」这类问题无法诊断。
 """
 
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from myharness import hooks
-from myharness.config import DEFAULT_MAX_TOKENS, MAX_TOKENS, _env_int
+from myharness.config import (
+    DEFAULT_MAX_TOKENS,
+    MAX_TOKENS,
+    REPO_ROOT,
+    _env_dir,
+    _env_int,
+)
 
 
 # ============================================================
@@ -110,3 +120,57 @@ def test_agent_loop_passes_configured_max_tokens(monkeypatch):
         hooks.clear_hooks()
 
     assert captured["max_tokens"] == config.MAX_TOKENS
+
+
+# ============================================================
+# WORKDIR：让 Agent 在别的目录工作
+# ============================================================
+
+def test_env_dir_uses_default_when_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("MYHARNESS_TEST_DIR", raising=False)
+    assert _env_dir("MYHARNESS_TEST_DIR", tmp_path) == tmp_path
+
+
+def test_env_dir_reads_existing_directory(monkeypatch, tmp_path):
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setenv("MYHARNESS_TEST_DIR", str(target))
+    assert _env_dir("MYHARNESS_TEST_DIR", tmp_path) == target.resolve()
+
+
+def test_env_dir_rejects_missing_directory(monkeypatch, tmp_path):
+    """目录不存在就报错，否则会被静默接受成一个写不进去的工作区。"""
+    monkeypatch.setenv("MYHARNESS_TEST_DIR", str(tmp_path / "nope"))
+    with pytest.raises(ValueError, match="existing directory"):
+        _env_dir("MYHARNESS_TEST_DIR", tmp_path)
+
+
+def test_workdir_env_var_is_honoured(tmp_path):
+    """端到端：WORKDIR 环境变量必须让 Agent 在另一个目录工作。
+
+    必须在子进程里跑 —— config.WORKDIR 在 import 时求值，同进程内改环境
+    变量已经太晚（这正是 teams 隔离一度失效的根因）。
+    """
+    target = tmp_path / "other_project"
+    target.mkdir()
+
+    env = {
+        **os.environ,
+        "WORKDIR": str(target),
+        "PYTHONPATH": str(REPO_ROOT),
+    }
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import myharness.config as c; print('WORKDIR=' + str(c.WORKDIR))",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    line = next(l for l in proc.stdout.splitlines() if l.startswith("WORKDIR="))
+    assert Path(line.split("=", 1)[1]) == target.resolve()
