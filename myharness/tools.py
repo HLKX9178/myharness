@@ -17,7 +17,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from myharness.config import WORKDIR, memory_store, skill_library
+from myharness import config
+from myharness.config import memory_store, skill_library
 from myharness.mcp.registry import get_registry
 from myharness.mcp.mock_servers import MOCK_SERVERS
 
@@ -25,6 +26,11 @@ from myharness.mcp.mock_servers import MOCK_SERVERS
 # ============================================================
 # 实现
 # ============================================================
+
+def _get_workdir() -> Path:
+    """动态获取当前工作目录（支持 TeamAgent 隔离）。"""
+    return config.WORKDIR
+
 
 def safe_path(p: str) -> Path:
     """把相对路径 p 转成绝对路径，并确保它落在工作目录内。
@@ -34,8 +40,9 @@ def safe_path(p: str) -> Path:
 
     越界时抛出 ValueError，由调用它的工具函数捕获并转成错误字符串。
     """
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
+    workdir = _get_workdir()
+    path = (workdir / p).resolve()
+    if not path.is_relative_to(workdir):
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 
@@ -46,7 +53,7 @@ def run_bash(command: str) -> str:
         r = subprocess.run(
             command,
             shell=True,
-            cwd=WORKDIR,
+            cwd=_get_workdir(),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -98,7 +105,7 @@ def write_file(path: str, content: str) -> str:
 
 def run_glob(pattern: str) -> str:
     """按 glob 模式列出工作目录中的文件。"""
-    matches = sorted(set(glob.glob(pattern, root_dir=WORKDIR, recursive=True)))
+    matches = sorted(set(glob.glob(pattern, root_dir=_get_workdir(), recursive=True)))
     shown = matches[:200]
     if len(matches) > 200:
         shown.append("... (more matches omitted; narrow the pattern)")

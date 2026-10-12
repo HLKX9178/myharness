@@ -336,3 +336,26 @@ class TestTeamAgent:
         assert status["agent_id"] == "agent_1"
         assert "workspace" in status
         assert "session_messages" in status
+
+    def test_file_isolation_behavior(self, tmp_path):
+        """测试：验证文件操作真正隔离（行为测试）。"""
+        board = TaskBoard(tmp_path / "board.jsonl")
+        queue = MessageQueue(tmp_path / "queue")
+
+        agent_a = TeamAgent("agent_a", tmp_path, board, queue)
+        agent_b = TeamAgent("agent_b", tmp_path, board, queue)
+
+        # Agent A 在自己的工作目录写文件
+        file_a = agent_a.workspace / "test.txt"
+        file_a.write_text("Agent A was here")
+
+        # Agent B 在自己的工作目录写同名文件
+        file_b = agent_b.workspace / "test.txt"
+        file_b.write_text("Agent B was here")
+
+        # 验证：两个文件独立存在，内容不同
+        assert file_a.exists()
+        assert file_b.exists()
+        assert file_a.read_text() == "Agent A was here"
+        assert file_b.read_text() == "Agent B was here"
+        assert file_a != file_b  # 物理路径不同
