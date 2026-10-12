@@ -5,6 +5,7 @@
 """
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -87,6 +88,43 @@ MEMORY_DIR = REPO_ROOT / ".myharness" / "memory"
 # 初始化安全策略和审计日志
 init_policy(WORKDIR)
 init_audit_logger(AUDIT_LOG)
+
+
+def get_workdir() -> Path:
+    """当前工作目录（运行时读取）。
+
+    不要用 `from config import WORKDIR` 缓存结果 —— 那是 import 时的快照，
+    一个可变的全局变量被冻结进了另一个模块。
+    """
+    return WORKDIR
+
+
+@contextmanager
+def use_workdir(path: Path | str):
+    """临时把工作目录切到 path，作用域结束后无条件恢复。
+
+    工具层（tools._get_workdir）与权限层（security 的 policy）必须**同时**切换，
+    否则会出现「审计记录 A，文件实际写到 B」。把两者绑在同一处，使它们无法分叉
+    —— 这是本函数存在的唯一理由。
+
+    这是对 AGENTS.md「禁止可变全局状态」的**受控例外**，与 guards 同类：
+    生命周期被限制在 with 块内，且退出时恢复。
+    长期方案是把 workspace 作为显式参数传给 agent_loop / assemble_tool_pool，
+    但那要先改 hook 签名（hook 目前只有 block 一个参数，表达不了 per-agent 策略）。
+    """
+    global WORKDIR
+    target = Path(path).resolve()
+    if not target.is_dir():
+        raise ValueError(f"workspace must be an existing directory, got {target}")
+
+    previous = WORKDIR
+    WORKDIR = target
+    init_policy(target)
+    try:
+        yield target
+    finally:
+        WORKDIR = previous
+        init_policy(previous)
 
 memory_store = MemoryStore(MEMORY_DIR)
 

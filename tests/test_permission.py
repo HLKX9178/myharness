@@ -13,7 +13,7 @@ import pytest
 
 from myharness import dispatch, hooks
 from myharness.audit import get_audit_logger, init_audit_logger
-from myharness.security import init_policy, permission_hook
+from myharness.security import get_policy, init_policy, permission_hook
 
 PATH_TOOLS = ["read_file", "write_file", "edit_file"]
 
@@ -94,6 +94,81 @@ def test_absolute_path_outside_workspace_denied():
 
     assert "Permission denied" in out
     assert executed == []
+
+
+# ============================================================
+# 工作区切换：工具边界与权限边界必须一致
+# ============================================================
+
+@pytest.fixture
+def other_workspace(tmp_path):
+    """另一个（不存在的）工作区目录。"""
+    path = tmp_path / "agent_ws"
+    path.mkdir()
+    return path
+
+
+def test_use_workdir_switches_both_layers(other_workspace):
+    """use_workdir 必须同时切工具边界与权限边界。
+
+    回归目标：工具层改成动态读取 config.WORKDIR 后，权限层仍固定在
+    import 时的工作区，两层就会分叉 —— 审计记录 A，文件实际写到 B。
+    """
+    from myharness import config
+    from myharness.tools import safe_path
+
+    with config.use_workdir(other_workspace):
+        # 工具层跟着切
+        assert safe_path("a.txt") == (other_workspace / "a.txt").resolve()
+        # 权限层跟着切
+        assert get_policy().workspace == other_workspace.resolve()
+
+        # 绝对路径落在当前工作区内 -> 必须放行（分叉时这里会被拒）
+        assert permission_hook(
+            make_block("write_file", path=str(other_workspace / "a.txt"))
+        ) is None
+
+    # 退出后两层必须仍然指向同一个工作区
+    assert config.get_workdir() == get_policy().workspace
+
+
+def test_use_workdir_restores_after_exception(other_workspace):
+    """with 块内抛异常也必须恢复，否则后续操作会全部写错地方。"""
+    from myharness import config
+
+    before = config.get_workdir()
+
+    with pytest.raises(RuntimeError):
+        with config.use_workdir(other_workspace):
+            assert config.get_workdir() == other_workspace.resolve()
+            raise RuntimeError("boom")
+
+    assert config.get_workdir() == before
+    assert get_policy().workspace == before
+
+
+def test_use_workdir_rejects_missing_directory(tmp_path):
+    """目录不存在时直接报错，不静默接受一个写不进去的工作区。"""
+    from myharness import config
+
+    with pytest.raises(ValueError, match="existing directory"):
+        with config.use_workdir(tmp_path / "missing"):
+            pass
+
+
+def test_audit_target_matches_real_location(other_workspace):
+    """审计记录的 target 必须是实际操作的那个路径。
+
+    两层分叉时，审计会记成旧工作区下的路径 —— M2 验收项
+    「能回答某次操作是谁在何时批准/拒绝的」就不再可靠。
+    """
+    from myharness import config
+
+    with config.use_workdir(other_workspace):
+        permission_hook(make_block("write_file", path="note.txt"))
+        record = get_audit_logger().query_history(limit=1)[0]
+
+    assert record["target"] == str(other_workspace / "note.txt")
 
 
 # ============================================================

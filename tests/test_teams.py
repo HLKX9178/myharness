@@ -12,9 +12,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from myharness import config, hooks, loop
 from myharness.teams import (
     TaskBoard,
     TaskStatus,
@@ -337,25 +339,50 @@ class TestTeamAgent:
         assert "workspace" in status
         assert "session_messages" in status
 
-    def test_file_isolation_behavior(self, tmp_path):
-        """测试：验证文件操作真正隔离（行为测试）。"""
+    def test_file_isolation_behavior(self, tmp_path, monkeypatch):
+        """端到端：工具写入必须落在 Agent 自己的 workspace 内。
+
+        走生产入口（claim_and_execute -> agent_loop -> execute_tool），而不是在
+        测试里照抄隔离逻辑 —— 照抄的话实现改了测试不会跟着红。
+        """
         board = TaskBoard(tmp_path / "board.jsonl")
         queue = MessageQueue(tmp_path / "queue")
+        agent = TeamAgent("agent_a", tmp_path, board, queue)
+        board.create_task("写文件", "把 note.txt 写到你的工作目录")
 
-        agent_a = TeamAgent("agent_a", tmp_path, board, queue)
-        agent_b = TeamAgent("agent_b", tmp_path, board, queue)
+        class FakeProvider:
+            """第一次调用返回 write_file 的 tool_use，之后结束循环。"""
 
-        # Agent A 在自己的工作目录写文件
-        file_a = agent_a.workspace / "test.txt"
-        file_a.write_text("Agent A was here")
+            def __init__(self):
+                self.turn = 0
 
-        # Agent B 在自己的工作目录写同名文件
-        file_b = agent_b.workspace / "test.txt"
-        file_b.write_text("Agent B was here")
+            def chat(self, messages, tools, system, max_tokens):
+                self.turn += 1
+                if self.turn == 1:
+                    content = [
+                        SimpleNamespace(
+                            type="tool_use",
+                            id="t1",
+                            name="write_file",
+                            input={"path": "note.txt", "content": "from A"},
+                        )
+                    ]
+                else:
+                    content = [SimpleNamespace(type="text", text="done")]
+                return SimpleNamespace(
+                    content=content,
+                    usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                )
 
-        # 验证：两个文件独立存在，内容不同
-        assert file_a.exists()
-        assert file_b.exists()
-        assert file_a.read_text() == "Agent A was here"
-        assert file_b.read_text() == "Agent B was here"
-        assert file_a != file_b  # 物理路径不同
+        # 只摘掉 Stop hook：它绑定的是**真实** provider，会在测试里发网络请求。
+        saved_stop = list(hooks.registered_hooks("Stop"))
+        hooks.HOOKS["Stop"].clear()
+        try:
+            monkeypatch.setattr(loop, "provider", FakeProvider())
+            result = agent.claim_and_execute()
+        finally:
+            hooks.HOOKS["Stop"][:] = saved_stop
+
+        assert result["success"] is True
+        assert (agent.workspace / "note.txt").read_text(encoding="utf-8") == "from A"
+        assert not (config.REPO_ROOT / "note.txt").exists(), "不得泄漏到仓库根"

@@ -28,8 +28,12 @@ from myharness.mcp.mock_servers import MOCK_SERVERS
 # ============================================================
 
 def _get_workdir() -> Path:
-    """动态获取当前工作目录（支持 TeamAgent 隔离）。"""
-    return config.WORKDIR
+    """动态获取当前工作目录（支持工作区切换）。
+
+    委托给 config.get_workdir()，使「工作区」只有一个读取入口 ——
+    导入常量（from config import WORKDIR）会拿到 import 时的快照。
+    """
+    return config.get_workdir()
 
 
 def safe_path(p: str) -> Path:

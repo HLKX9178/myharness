@@ -12,11 +12,15 @@
 - 会话目录：{team_dir}/agent_{agent_id}/sessions/
 """
 
-import os
 from pathlib import Path
 from typing import Any
 
-from myharness.config import provider, build_system_prompt, MAX_TOKENS
+from myharness.config import (
+    MAX_TOKENS,
+    build_system_prompt,
+    provider,
+    use_workdir,
+)
 from myharness.loop import agent_loop
 from myharness.session import Session
 from myharness.teams.taskboard import TaskBoard, TaskStatus
@@ -97,16 +101,13 @@ class TeamAgent:
             "content": f"Task: {task.title}\n\n{task.description}"
         })
 
-        # 3. 切换工作目录并执行
-        original_cwd = Path.cwd()
-        original_workdir = os.environ.get("WORKDIR")
-
+        # 3. 在自己的 workspace 里执行
+        #    use_workdir 同时切换**工具边界**（tools.safe_path）和**权限边界**
+        #    （security 的 policy），退出时无条件恢复。
+        #    只改其中一个会出现「审计记录 A，文件实际写到 B」。
         try:
-            os.chdir(self.workspace)
-            os.environ["WORKDIR"] = str(self.workspace)
-
-            # 执行 agent_loop
-            agent_loop(self.messages)
+            with use_workdir(self.workspace):
+                agent_loop(self.messages)
 
             # 4. 提取结果（最后一条 assistant 消息）
             result = None
@@ -143,14 +144,6 @@ class TeamAgent:
                 "task_id": task.task_id,
                 "error": error_msg,
             }
-
-        finally:
-            # 恢复工作目录
-            os.chdir(original_cwd)
-            if original_workdir:
-                os.environ["WORKDIR"] = original_workdir
-            else:
-                os.environ.pop("WORKDIR", None)
 
     def send_message(self, to_agent: str, content: Any) -> str:
         """
