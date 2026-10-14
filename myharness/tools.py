@@ -14,6 +14,7 @@
 
 import glob
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -27,63 +28,153 @@ from myharness.mcp.mock_servers import MOCK_SERVERS
 # 实现
 # ============================================================
 
-def _get_workdir() -> Path:
-    """动态获取当前工作目录（支持工作区切换）。
+def _get_workdir(workspace: Path | None = None) -> Path:
+    """获取工作目录。
 
-    委托给 config.get_workdir()，使「工作区」只有一个读取入口 ——
-    导入常量（from config import WORKDIR）会拿到 import 时的快照。
+    Args:
+        workspace: 显式传入的工作目录；None 时回退到全局 config.WORKDIR
+
+    优先使用显式传入的 workspace（多 Agent 隔离场景），
+    未传入时回退到 config.get_workdir()（向后兼容）。
     """
-    return config.get_workdir()
+    return workspace if workspace is not None else config.get_workdir()
 
 
-def safe_path(p: str) -> Path:
+def safe_path(p: str, workspace: Path | None = None) -> Path:
     """把相对路径 p 转成绝对路径，并确保它落在工作目录内。
 
     这是**兜底防线**，不是权限层。权限判定由 security.permission_hook
     在 dispatch 路径上完成；这里只保证即使 hook 被绕过，工具也无法越界。
 
     越界时抛出 ValueError，由调用它的工具函数捕获并转成错误字符串。
+
+    Args:
+        p: 相对路径
+        workspace: 工作目录；None 时使用全局 WORKDIR
     """
-    workdir = _get_workdir()
+    workdir = _get_workdir(workspace)
     path = (workdir / p).resolve()
     if not path.is_relative_to(workdir):
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 
 
-def run_bash(command: str) -> str:
-    """执行一条 shell 命令。"""
+def run_bash(command: str, workspace: Path | None = None) -> str:
+    """
+    执行一条 shell 命令（支持流式输出）。
+
+    对于长时运行的命令，会实时显示输出进度。
+    """
     try:
-        r = subprocess.run(
+        workdir = _get_workdir(workspace)
+
+        # 使用 Popen 进行流式输出
+        process = subprocess.Popen(
             command,
             shell=True,
-            cwd=_get_workdir(),
-            capture_output=True,
+            cwd=workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=120,
+            bufsize=1,  # 行缓冲
         )
-        out = (r.stdout + r.stderr).strip()
-        return out[:50000] if out else "(no output)"
+
+        output_lines = []
+        max_lines = 2000  # 最多保留 2000 行输出
+
+        # 实时读取输出（带超时保护）
+        import threading
+        import queue
+
+        output_queue = queue.Queue()
+
+        def read_output():
+            """在单独线程中读取输出，避免阻塞"""
+            try:
+                for line in process.stdout:
+                    output_queue.put(("line", line.rstrip()))
+            except Exception as e:
+                output_queue.put(("error", str(e)))
+            finally:
+                output_queue.put(("done", None))
+
+        # 启动读取线程
+        reader_thread = threading.Thread(target=read_output, daemon=True)
+        reader_thread.start()
+
+        # 从队列读取输出，带超时
+        timeout = 120  # 总超时 120 秒
+        start_time = time.time()
+
+        while True:
+            remaining_time = timeout - (time.time() - start_time)
+            if remaining_time <= 0:
+                # 超时，强制终止进程
+                process.kill()
+                output_lines.append("(command timed out after 120s)")
+                break
+
+            try:
+                msg_type, content = output_queue.get(timeout=min(1, remaining_time))
+
+                if msg_type == "line":
+                    # 实时打印到终端
+                    print(f"  {content}")
+                    output_lines.append(content)
+
+                    # 限制内存占用
+                    if len(output_lines) > max_lines:
+                        output_lines = output_lines[-max_lines:]
+
+                elif msg_type == "error":
+                    output_lines.append(f"(read error: {content})")
+                    break
+
+                elif msg_type == "done":
+                    break
+
+            except queue.Empty:
+                # 检查进程是否还在运行
+                if process.poll() is not None:
+                    # 进程已结束，再等一下让线程读完剩余输出
+                    reader_thread.join(timeout=1)
+                    break
+
+        # 等待进程结束
+        try:
+            return_code = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return_code = -1
+
+        # 组装结果
+        result = "\n".join(output_lines)
+
+        if return_code != 0:
+            result += f"\n(exit code: {return_code})"
+
+        return result[:50000] if result else "(no output)"
+
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
     except (FileNotFoundError, OSError) as e:
         return f"Error: {e}"
 
 
-def read_file(path: str) -> str:
+def read_file(path: str, workspace: Path | None = None) -> str:
     """读取一个文件。"""
     try:
-        return safe_path(path).read_text(encoding="utf-8")
+        return safe_path(path, workspace).read_text(encoding="utf-8")
     except Exception as exc:
         return f"Error: {type(exc).__name__}: {exc}"
 
 
-def edit_file(path: str, old_text: str, new_text: str) -> str:
+def edit_file(path: str, old_text: str, new_text: str, workspace: Path | None = None) -> str:
     """把文件中的 old_text 替换为 new_text。"""
     try:
-        file_path = safe_path(path)
+        file_path = safe_path(path, workspace)
         content = file_path.read_text(encoding="utf-8")
         if old_text not in content:
             return f"Error: old_text not found in {path}"
@@ -97,26 +188,26 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
         return f"Error: {type(exc).__name__}: {exc}"
 
 
-def write_file(path: str, content: str) -> str:
+def write_file(path: str, content: str, workspace: Path | None = None) -> str:
     """把 content 写入文件。"""
     try:
-        file_path = safe_path(path)
+        file_path = safe_path(path, workspace)
         file_path.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} bytes to {path}"
     except Exception as exc:
         return f"Error: {type(exc).__name__}: {exc}"
 
 
-def run_glob(pattern: str) -> str:
+def run_glob(pattern: str, workspace: Path | None = None) -> str:
     """按 glob 模式列出工作目录中的文件。"""
-    matches = sorted(set(glob.glob(pattern, root_dir=_get_workdir(), recursive=True)))
+    matches = sorted(set(glob.glob(pattern, root_dir=_get_workdir(workspace), recursive=True)))
     shown = matches[:200]
     if len(matches) > 200:
         shown.append("... (more matches omitted; narrow the pattern)")
     return "\n".join(shown) if shown else "(no matches)"
 
 
-def connect_mcp(name: str) -> str:
+def connect_mcp(name: str, workspace: Path | None = None) -> str:
     """连接 MCP server（模型可调用的工具）。"""
     if name not in MOCK_SERVERS:
         available = ", ".join(MOCK_SERVERS.keys())
@@ -141,6 +232,197 @@ def connect_mcp(name: str) -> str:
         )
     except Exception as exc:
         return f"Error: {type(exc).__name__}: {exc}"
+
+
+# ============================================================
+# Teams 工具集（多 Agent 协作）
+# ============================================================
+
+# 全局 Team Manager 实例
+_active_team = None
+
+
+def spawn_team(num_agents: int, workspace: Path | None = None) -> str:
+    """
+    启动多个 AI Agent 组成团队并行工作。
+
+    Args:
+        num_agents: Agent 数量（1-10）
+        workspace: 工作区路径
+
+    Returns:
+        状态信息字符串
+    """
+    global _active_team
+
+    try:
+        # 检查是否已有活跃团队
+        if _active_team is not None:
+            return "Error: Team already active. Use stop_team() first."
+
+        # 验证参数
+        if not isinstance(num_agents, int) or num_agents < 1 or num_agents > 10:
+            return "Error: num_agents must be between 1 and 10"
+
+        from myharness.teams import AgentManager
+
+        workdir = _get_workdir(workspace)
+        team_dir = workdir / ".team"
+
+        # 创建并启动团队
+        _active_team = AgentManager(team_dir=team_dir, num_agents=num_agents)
+        _active_team.start_team()
+
+        return f"Team started: {num_agents} agents ready. Use create_task() to assign work."
+
+    except Exception as exc:
+        _active_team = None
+        return f"Error: Failed to start team: {type(exc).__name__}: {exc}"
+
+
+def stop_team() -> str:
+    """
+    停止当前活跃的 Agent 团队。
+
+    Returns:
+        状态信息字符串
+    """
+    global _active_team
+
+    try:
+        if _active_team is None:
+            return "Error: No active team to stop"
+
+        _active_team.stop_team()
+        _active_team = None
+
+        return "Team stopped successfully"
+
+    except Exception as exc:
+        return f"Error: Failed to stop team: {type(exc).__name__}: {exc}"
+
+
+def create_task(title: str, description: str) -> str:
+    """
+    创建任务并分配给团队中的某个 Agent。
+
+    Args:
+        title: 任务标题
+        description: 任务详细描述
+
+    Returns:
+        任务 ID 或错误信息
+    """
+    try:
+        if _active_team is None:
+            return "Error: No active team. Use spawn_team() first."
+
+        task_id = _active_team.taskboard.create_task(title=title, description=description)
+
+        return f"Task created: {task_id}. An agent will claim it soon."
+
+    except Exception as exc:
+        return f"Error: Failed to create task: {type(exc).__name__}: {exc}"
+
+
+def list_tasks() -> str:
+    """
+    列出团队中的所有任务及其状态。
+
+    Returns:
+        任务列表（文本格式）
+    """
+    try:
+        if _active_team is None:
+            return "Error: No active team"
+
+        tasks = _active_team.taskboard.list_tasks()
+
+        if not tasks:
+            return "No tasks in queue"
+
+        lines = []
+        for task in tasks:
+            status_icon = {
+                "pending": "[PENDING]",
+                "in_progress": "[IN_PROGRESS]",
+                "completed": "[COMPLETED]",
+                "failed": "[FAILED]"
+            }.get(task.status.value, "[UNKNOWN]")
+
+            lines.append(f"{status_icon} {task.title}")
+
+            if task.claimed_by:
+                lines.append(f"   Agent: {task.claimed_by}")
+
+            if task.result:
+                result_preview = task.result[:100] + "..." if len(task.result) > 100 else task.result
+                lines.append(f"   Result: {result_preview}")
+
+        return "\n".join(lines)
+
+    except Exception as exc:
+        return f"Error: Failed to list tasks: {type(exc).__name__}: {exc}"
+
+
+def get_task_result(task_id: str) -> str:
+    """
+    获取指定任务的结果。
+
+    Args:
+        task_id: 任务 ID
+
+    Returns:
+        任务结果或错误信息
+    """
+    try:
+        if _active_team is None:
+            return "Error: No active team"
+
+        task = _active_team.taskboard.get_task(task_id)
+
+        if task is None:
+            return f"Error: Task {task_id} not found"
+
+        if task.status.value == "completed":
+            return f"Task completed:\n{task.result or '(no result)'}"
+        elif task.status.value == "failed":
+            return f"Task failed:\n{task.result or '(no error details)'}"
+        elif task.status.value == "in_progress":
+            return f"Task still in progress (claimed by {task.claimed_by})"
+        else:
+            return f"Task pending (status: {task.status.value})"
+
+    except Exception as exc:
+        return f"Error: Failed to get task result: {type(exc).__name__}: {exc}"
+
+
+def send_team_message(to_agent: str, content: str) -> str:
+    """
+    向团队中的某个 Agent 发送消息。
+
+    Args:
+        to_agent: 目标 Agent ID
+        content: 消息内容
+
+    Returns:
+        状态信息
+    """
+    try:
+        if _active_team is None:
+            return "Error: No active team"
+
+        from_agent = "coordinator"  # 协调者（主 Agent）
+        message_id = _active_team.message_queue.send_message(
+            from_agent=from_agent,
+            to_agent=to_agent,
+            content=content
+        )
+
+        return f"Message sent to {to_agent} (ID: {message_id})"
+
+    except Exception as exc:
+        return f"Error: Failed to send message: {type(exc).__name__}: {exc}"
 
 
 # ============================================================
@@ -221,6 +503,88 @@ TOOLS = [
             "required": ["name"],
         },
     },
+    {
+        "name": "spawn_team",
+        "description": "Start multiple AI agents to work in parallel on different tasks. Use this when you need to scale work across multiple independent tasks.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "num_agents": {
+                    "type": "integer",
+                    "description": "Number of agents to spawn (1-10)",
+                    "minimum": 1,
+                    "maximum": 10,
+                },
+            },
+            "required": ["num_agents"],
+        },
+    },
+    {
+        "name": "stop_team",
+        "description": "Stop the currently active agent team and clean up resources.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "create_task",
+        "description": "Create a task for the agent team. An available agent will claim and execute it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short task title",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed task description with requirements and context",
+                },
+            },
+            "required": ["title", "description"],
+        },
+    },
+    {
+        "name": "list_tasks",
+        "description": "List all tasks in the team queue with their status (pending/in_progress/completed/failed).",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_task_result",
+        "description": "Get the result of a completed task by its ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID returned when the task was created",
+                },
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "send_team_message",
+        "description": "Send a message to a specific agent in the team.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to_agent": {
+                    "type": "string",
+                    "description": "Target agent ID",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Message content",
+                },
+            },
+            "required": ["to_agent", "content"],
+        },
+    },
 ]
 
 # 实现：工具名 -> 函数。必须与 TOOLS 一一对应。
@@ -231,6 +595,12 @@ TOOL_HANDLERS = {
     "write_file": write_file,
     "glob_files": run_glob,
     "connect_mcp": connect_mcp,
+    "spawn_team": spawn_team,
+    "stop_team": stop_team,
+    "create_task": create_task,
+    "list_tasks": list_tasks,
+    "get_task_result": get_task_result,
+    "send_team_message": send_team_message,
 }
 
 
@@ -238,13 +608,16 @@ TOOL_HANDLERS = {
 # 工具池组装（对应教程 s14 的 assemble_tool_pool）
 # ============================================================
 
-def assemble_tool_pool() -> tuple[list[dict], dict[str, Callable]]:
+def assemble_tool_pool(workspace: Path | None = None) -> tuple[list[dict], dict[str, Callable]]:
     """组装本轮要交给模型的工具池。
 
     返回 (tools, handlers)，两者来自**同一次快照** —— 这保证模型看到的
     工具一定都有对应实现。
 
     内置工具 + 技能工具（load_skill）+ 记忆工具（remember）+ MCP 工具。
+
+    Args:
+        workspace: 工作目录（传递给工具函数）；None 时使用全局 WORKDIR
     """
     # 1. 内置工具
     builtin_tools = list(TOOLS)

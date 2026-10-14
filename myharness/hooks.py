@@ -23,10 +23,15 @@ UserPromptSubmit 语义不同，由 submit_user_prompt() 触发：
   - str       -> 注入上下文；多个 hook 的结果按注册顺序合并，不短路
   - Block(..) -> 拒绝本次输入，短路后续 hook，输入不进入 messages
 
+Hook 签名扩展：从 M6 开始，hook 可接收可选的 workspace 参数，用于
+per-agent 策略。旧签名仍然兼容（通过 inspect.signature 判断）。
+
 这个模块**不依赖项目内任何其它模块**，以便被任意层安全导入。
 """
 
+import inspect
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 HookCallback = Callable[..., Any]
@@ -56,26 +61,30 @@ def register_hook(event: str, callback: HookCallback) -> None:
     HOOKS[event].append(callback)
 
 
-def trigger_hooks(event: str, *args: Any) -> Any:
+def trigger_hooks(event: str, *args: Any, workspace: Path | None = None) -> Any:
     """触发某个事件的全部 hook。
 
     返回第一个非 None 的结果并立即短路；全部返回 None 时返回 None。
+
+    workspace 参数可选传入，hook 如果支持该参数会收到它（通过签名检查）。
     """
     for callback in HOOKS[event]:
-        result = callback(*args)
+        result = _invoke_hook(callback, args, workspace)
         if result is not None:
             return result
     return None
 
 
-def trigger_all_hooks(event: str, *args: Any) -> None:
+def trigger_all_hooks(event: str, *args: Any, workspace: Path | None = None) -> None:
     """触发全部 hook 并忽略返回值。
 
     用于 PostToolUse 这类「只观察、不干预」的事件：任何一个 hook 的
     返回值都不应该阻止其它 hook 收到通知，否则它们会静默丢失事件。
+
+    workspace 参数可选传入，hook 如果支持该参数会收到它（通过签名检查）。
     """
     for callback in HOOKS[event]:
-        callback(*args)
+        _invoke_hook(callback, args, workspace)
 
 
 def submit_user_prompt(query: str) -> str | Block:
@@ -102,6 +111,20 @@ def submit_user_prompt(query: str) -> str | Block:
         return query
     context = "\n\n".join(injected)
     return f"<context>\n{context}\n</context>\n\n{query}"
+
+
+def _invoke_hook(callback: HookCallback, args: tuple, workspace: Path | None) -> Any:
+    """调用 hook，自动判断是否传入 workspace 参数。
+
+    通过 inspect.signature 检查 hook 是否接受 workspace 参数：
+    - 有 workspace 参数 -> 传入
+    - 没有 -> 只传 *args（向后兼容旧 hook）
+    """
+    sig = inspect.signature(callback)
+    if "workspace" in sig.parameters:
+        return callback(*args, workspace=workspace)
+    else:
+        return callback(*args)
 
 
 def registered_hooks(event: str) -> list[HookCallback]:

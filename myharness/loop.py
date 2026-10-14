@@ -17,7 +17,9 @@
   - 清空守卫跨轮状态             对话轮次的边界在本函数上
 """
 
-from myharness.config import MAX_TOKENS, build_system_prompt, provider
+from pathlib import Path
+
+from myharness.config import MAX_TOKENS, build_system_prompt, get_workdir, provider
 from myharness.context import ContextManager
 from myharness.dispatch import execute_tool
 from myharness.guards import failure_guard, reset_turn_state
@@ -32,10 +34,19 @@ MAX_TOTAL_TOKENS = 100000  # 本轮累计预算；单次请求上限见 config.M
 context_manager = ContextManager(max_messages=30)
 
 
-def agent_loop(messages: list) -> None:
-    """驱动一轮完整对话，直到模型给出不再调用工具的回复。"""
+def agent_loop(messages: list, workspace: Path | None = None) -> None:
+    """驱动一轮完整对话，直到模型给出不再调用工具的回复。
+
+    Args:
+        messages: 消息历史
+        workspace: 工作目录；None 时使用全局 config.WORKDIR
+    """
     # 对话轮次边界：清空有状态 hook 的跨轮数据
     reset_turn_state()
+
+    # 未传入时使用全局 WORKDIR
+    if workspace is None:
+        workspace = get_workdir()
 
     total_tokens = 0
 
@@ -59,7 +70,7 @@ def agent_loop(messages: list) -> None:
             print(f"{len(messages)}{Color.RESET}")
 
         # 每轮重新组装工具池：M4 接入 MCP 后，新工具下一轮即可见
-        tools, handlers = assemble_tool_pool()
+        tools, handlers = assemble_tool_pool(workspace)
 
         response = provider.chat(
             messages=messages,
@@ -90,7 +101,7 @@ def agent_loop(messages: list) -> None:
         # 重复调用拦截与权限判定都在 PreToolUse 上，此处不感知
         results = []
         for block in tool_calls:
-            output = execute_tool(block, handlers)
+            output = execute_tool(block, handlers, workspace)
             results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,

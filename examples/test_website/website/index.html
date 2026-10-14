@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="张三的个人主页 - 全栈开发工程师" />
+  <title>张三 | 个人主页</title>
+
+  <!-- 引入外部字体 -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet" />
+
+  <!-- 引入自定义样式 -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ============ 导航栏 ============ -->
+  <nav class="navbar" id="navbar">
+    <div class="nav-container">
+      <!-- 网站标志 / Logo -->
+      <a href="#home" class="nav-logo">张三<span>.</span></a>
+
+      <!-- 导航链接（桌面端） -->
+      <ul class="nav-menu" id="navMenu">
+        <li><a href="#home" class="nav-link active">首页</a></li>
+        <li><a href="#about" class="nav-link">关于我</a></li>
+        <li><a href="#skills" class="nav-link">技能</a></li>
+        <li><a href="#projects" class="nav-link">项目</a></li>
+        <li><a href="#contact" class="nav-link">联系</a></li>
+      </ul>
+
+      <!-- 移动端汉堡菜单按钮 -->
+      <button class="hamburger" id="hamburger" aria-label="菜单">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ============ 首页 / Hero 区域 ============ -->
+  <section id="home" class="hero">
+    <div class="hero-content">
+      <p class="hero-greeting">👋 你好，我是</p>
+      <h1 class="hero-name">张三</h1>
+      <h2 class="hero-title">全栈开发工程师</h2>
+      <p class="hero-description">
+        热爱编程，专注于构建优雅且高效的 Web 应用。<br />
+        致力于用技术解决实际问题，创造有价值的产品。
+      </p>
+      <div class="hero-buttons">
+        <a href="#projects" class="btn btn-primary">查看作品</a>
+        <a href="#contact" class="btn btn-outline">联系我</a>
+      </div>
+    </div>
+    <!-- 向下滚动提示箭头 -->
+    <a href="#about" class="scroll-down" aria-label="向下滚动">
+      <span></span>
+    </a>
+  </section>
+
+  <!-- ============ 关于我 ============ -->
+  <section id="about" class="section about">
+    <div class="container">
+      <h2 class="section-title">关于我</h2>
+      <div class="section-title-line"></div>
+
+      <div class="about-content">
+        <!-- 左侧：个人介绍文字 -->
+        <div class="about-text">
+          <p>
+            我是一名拥有 5 年经验的全栈开发工程师，擅长使用 JavaScript / TypeScript 生态进行前后端开发。
+            毕业于某某大学计算机科学专业，曾就职于多家互联网公司。
+          </p>
+          <p>
+            我对新技术保持持续学习的热情，注重代码质量与用户体验。
+            工作之余喜欢写技术博客、参与开源项目，也热爱摄影和旅行。
+          </p>
+
+          <!-- 个人信息列表 -->
+          <ul class="about-info">
+            <li><strong>姓名：</strong>张三</li>
+            <li><strong>邮箱：</strong>zhangsan@example.com</li>
+            <li><strong>所在地：</strong>中国 · 上海</li>
+            <li><strong>工作经验：</strong>5 年</li>
+          </ul>
+
+          <a href="#" class="btn btn-primary" download>下载简历</a>
+        </div>
+
+        <!-- 右侧：头像占位区 -->
+        <div class="about-avatar">
+          <div class="avatar-placeholder">
+            <span>头像</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 技能展示 ============ -->
+  <section id="skills" class="section skills">
+    <div class="container">
+      <h2 class="section-title">技能</h2>
+      <div class="section-title-line"></div>
+
+      <p class="section-subtitle">以下是我掌握的主要技术栈</p>
+
+      <!-- 技能卡片网格 -->
+      <div class="skills-grid">
+        <div class="skill-card" data-percent="90">
+          <div class="skill-icon">⚛️</div>
+          <h3>React</h3>
+          <p>熟练使用 React 生态，包括 Hooks、Context、Redux 等</p>
+          <div class="skill-bar">
+            <div class="skill-bar-fill" style="--width: 90%"></div>
+          </div>
+        </div>
+
+        <div class="skill-card" data-percent="85">
+          <div class="skill-icon">🟢</div>
+          <h3>Node.js</h3>
+          <p>后端 API 开发，Express / Koa / NestJS 框架经验</p>
+          <div class="skill-bar">
+            <div class="skill-bar-fill" style="--width: 85%"></div>
+          </div>
+        </div>
+
+        <div class="skill-card" data-percent="88">
+          <div class="skill-icon">🎨</div>
+          <h3>CSS / Tailwind</h3>
+          <p>精通现代 CSS 布局，响应式设计与动画效果</p>
+          <div class="skill-bar">
+            <div class="skill-bar-fill" style="--width: 88%"></div>
+          </div>
+        </div>
+
+        <div class="skill-card" data-percent="82">
+          <div class="skill-icon">📦</div>
+          <h3>TypeScript</h3>
+          <p>类型安全的开发实践，泛型与高级类型运用</p>
+          <div class="skill-bar">
+            <div class="skill-bar-fill" style="--width: 82%"></div>
+          </div>
+        </div>
+
+        <div class="skill-card" data-percent="80">
+          <div class="skill-icon">🗄️</div>
+          <h3>数据库</h3>
+          <p>MySQL / PostgreSQL / MongoDB / Redis 使用经验</p>
+          <div class="skill-bar">
+            <div class="skill-bar-fill" style="--width: 80%"></div>
+          </div>
+        </div>
+
+        <div class="skill-card" data-percent="75">
+          <div class="skill-icon">☁️</div>
+          <h3>云服务 / DevOps</h3>
+          <p>Docker、CI/CD、AWS / 阿里云部署与运维</p>
+          <div class="skill-bar">
+            <div class="skill-bar-fill" style="--width: 75%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 项目展示 ============ -->
+  <section id="projects" class="section projects">
+    <div class="container">
+      <h2 class="section-title">项目作品</h2>
+      <div class="section-title-line"></div>
+      <p class="section-subtitle">以下是我做过的一些代表性项目</p>
+
+      <!-- 项目卡片网格 -->
+      <div class="projects-grid">
+        <article class="project-card">
+          <div class="project-image project-img-1">
+            <span class="project-tag">Web App</span>
+          </div>
+          <div class="project-body">
+            <h3>在线商城系统</h3>
+            <p>基于 React + Node.js 的全栈电商项目，包含商品管理、购物车、支付、订单系统等功能。</p>
+            <div class="project-tech">
+              <span>React</span>
+              <span>Node.js</span>
+              <span>MongoDB</span>
+            </div>
+            <div class="project-links">
+              <a href="#" class="btn btn-small">查看详情</a>
+              <a href="#" class="btn btn-small btn-outline">源码</a>
+            </div>
+          </div>
+        </article>
+
+        <article class="project-card">
+          <div class="project-image project-img-2">
+            <span class="project-tag">Tool</span>
+          </div>
+          <div class="project-body">
+            <h3>任务管理工具</h3>
+            <p>一款灵感来自 Trello 的看板式任务管理应用，支持拖拽排序、团队协作和实时同步。</p>
+            <div class="project-tech">
+              <span>Vue</span>
+              <span>Express</span>
+              <span>WebSocket</span>
+            </div>
+            <div class="project-links">
+              <a href="#" class="btn btn-small">查看详情</a>
+              <a href="#" class="btn btn-small btn-outline">源码</a>
+            </div>
+          </div>
+        </article>
+
+        <article class="project-card">
+          <div class="project-image project-img-3">
+            <span class="project-tag">Mobile</span>
+          </div>
+          <div class="project-body">
+            <h3>天气查询 App</h3>
+            <p>基于 React Native 的跨平台天气应用，集成第三方天气 API，支持城市搜索与自动定位。</p>
+            <div class="project-tech">
+              <span>React Native</span>
+              <span>TypeScript</span>
+              <span>API</span>
+            </div>
+            <div class="project-links">
+              <a href="#" class="btn btn-small">查看详情</a>
+              <a href="#" class="btn btn-small btn-outline">源码</a>
+            </div>
+          </div>
+        </article>
+
+        <article class="project-card">
+          <div class="project-image project-img-4">
+            <span class="project-tag">Dashboard</span>
+          </div>
+          <div class="project-body">
+            <h3>数据可视化面板</h3>
+            <p>企业级数据监控面板，使用 ECharts 进行数据可视化，支持自定义图表与实时数据流。</p>
+            <div class="project-tech">
+              <span>React</span>
+              <span>ECharts</span>
+              <span>D3.js</span>
+            </div>
+            <div class="project-links">
+              <a href="#" class="btn btn-small">查看详情</a>
+              <a href="#" class="btn btn-small btn-outline">源码</a>
+            </div>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 联系方式 ============ -->
+  <section id="contact" class="section contact">
+    <div class="container">
+      <h2 class="section-title">联系我</h2>
+      <div class="section-title-line"></div>
+      <p class="section-subtitle">有任何想法或合作意向？欢迎与我联系！</p>
+
+      <div class="contact-content">
+        <!-- 左侧：联系方式列表 -->
+        <div class="contact-info">
+          <div class="contact-item">
+            <span class="contact-icon">📧</span>
+            <div>
+              <h4>邮箱</h4>
+              <p>zhangsan@example.com</p>
+            </div>
+          </div>
+          <div class="contact-item">
+            <span class="contact-icon">📱</span>
+            <div>
+              <h4>电话</h4>
+              <p>+86 138-0000-0000</p>
+            </div>
+          </div>
+          <div class="contact-item">
+            <span class="contact-icon">📍</span>
+            <div>
+              <h4>地址</h4>
+              <p>中国 · 上海市 · 浦东新区</p>
+            </div>
+          </div>
+          <!-- 社交媒体链接 -->
+          <div class="social-links">
+            <a href="#" aria-label="GitHub" title="GitHub">GitHub</a>
+            <a href="#" aria-label="掘金" title="掘金">掘金</a>
+            <a href="#" aria-label="知乎" title="知乎">知乎</a>
+            <a href="#" aria-label="微博" title="微博">微博</a>
+          </div>
+        </div>
+
+        <!-- 右侧：联系表单 -->
+        <form class="contact-form" id="contactForm">
+          <div class="form-group">
+            <label for="name">姓名</label>
+            <input type="text" id="name" name="name" placeholder="请输入您的姓名" required />
+          </div>
+          <div class="form-group">
+            <label for="email">邮箱</label>
+            <input type="email" id="email" name="email" placeholder="请输入您的邮箱" required />
+          </div>
+          <div class="form-group">
+            <label for="message">留言</label>
+            <textarea id="message" name="message" rows="5" placeholder="请输入留言内容" required></textarea>
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">发送消息</button>
+          <!-- 表单提交后的提示信息 -->
+          <p class="form-message" id="formMessage"></p>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 页脚 ============ -->
+  <footer class="footer">
+    <p>&copy; 2024 张三. All Rights Reserved.</p>
+    <p>使用 ❤️ 与 HTML/CSS/JS 构建</p>
+  </footer>
+
+  <!-- 引入 JavaScript -->
+  <script src="script.js"></script>
+</body>
+</html>

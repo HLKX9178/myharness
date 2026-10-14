@@ -10,6 +10,7 @@
 - 每个 TeamAgent 包装现有的 agent_loop
 - 工作目录：{team_dir}/agent_{agent_id}/workspace/
 - 会话目录：{team_dir}/agent_{agent_id}/sessions/
+- workspace 通过显式参数传递，不再使用全局状态
 """
 
 from pathlib import Path
@@ -19,7 +20,6 @@ from myharness.config import (
     MAX_TOKENS,
     build_system_prompt,
     provider,
-    use_workdir,
 )
 from myharness.loop import agent_loop
 from myharness.session import Session
@@ -81,10 +81,9 @@ class TeamAgent:
 
         工作流：
         1. 从任务板认领任务
-        2. 切换到独立工作目录
-        3. 执行 agent_loop
+        2. 准备上下文
+        3. 在独立工作目录执行 agent_loop（通过显式参数传递 workspace）
         4. 标记任务完成/失败
-        5. 恢复工作目录
 
         Returns:
             执行结果：{"success": bool, "task_id": str, "result": Any}
@@ -101,13 +100,9 @@ class TeamAgent:
             "content": f"Task: {task.title}\n\n{task.description}"
         })
 
-        # 3. 在自己的 workspace 里执行
-        #    use_workdir 同时切换**工具边界**（tools.safe_path）和**权限边界**
-        #    （security 的 policy），退出时无条件恢复。
-        #    只改其中一个会出现「审计记录 A，文件实际写到 B」。
+        # 3. 在独立 workspace 执行（通过显式参数传递）
         try:
-            with use_workdir(self.workspace):
-                agent_loop(self.messages)
+            agent_loop(self.messages, workspace=self.workspace)
 
             # 4. 提取结果（最后一条 assistant 消息）
             result = None

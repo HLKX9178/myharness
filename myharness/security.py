@@ -105,7 +105,7 @@ _PATH_TOOLS = {"read_file", "write_file", "edit_file"}
 _COMMAND_TOOLS = {"bash"}
 
 
-def permission_hook(block: Any) -> str | None:
+def permission_hook(block: Any, workspace: Path | None = None) -> str | None:
     """PreToolUse：所有工具的权限判定，并记录审计日志。
 
     返回 None 表示放行；返回字符串表示拒绝，该字符串会成为 tool_result。
@@ -114,8 +114,17 @@ def permission_hook(block: Any) -> str | None:
     只要工具走 execute_tool()，权限就一定被检查。
 
     注意：路径检查是相对 policy.workspace 解析的，不依赖进程当前目录。
+
+    Args:
+        block: tool_use block
+        workspace: 工作目录；None 时使用全局 policy
     """
-    policy = get_policy()
+    # 使用显式传入的 workspace，否则回退到全局 policy
+    if workspace is not None:
+        policy = SecurityPolicy(workspace)
+    else:
+        policy = get_policy()
+
     name = block.name
     args = block.input or {}
 

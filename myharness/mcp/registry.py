@@ -36,6 +36,91 @@ class MCPRegistry:
             raise ValueError(f"MCP server {client.name!r} already connected")
         self.clients[client.name] = client
 
+    def register_stdio_server(self, name: str, transport) -> None:
+        """
+        注册 stdio MCP server。
+
+        Args:
+            name: Server 名称
+            transport: StdioTransport 实例
+
+        该方法会：
+        1. 启动 transport（连接到 server 进程）
+        2. 创建 MCPClient
+        3. 发现工具
+        4. 注册到 registry
+        """
+        from myharness.mcp.stdio import StdioTransport
+
+        if not isinstance(transport, StdioTransport):
+            raise TypeError("transport must be StdioTransport instance")
+
+        # 启动连接
+        transport.start()
+
+        # 初始化握手
+        transport.send_request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "myharness",
+                    "version": "1.0.0",
+                },
+            },
+        )
+
+        # 发现工具
+        tools_result = transport.send_request("tools/list")
+        tools = tools_result.get("tools", [])
+
+        # 创建 client
+        client = MCPClient(name)
+        client.transport = transport  # 保存引用以便 cleanup
+
+        # 准备工具定义和 handlers
+        tool_defs = []
+        handlers = {}
+
+        for tool in tools:
+            tool_name = tool["name"]
+            tool_def = {
+                "name": tool_name,
+                "description": tool.get("description", ""),
+                "inputSchema": tool.get("inputSchema", {"type": "object"}),
+            }
+            tool_defs.append(tool_def)
+
+            # Handler: 调用 transport.send_request("tools/call")
+            def make_handler(tn):
+                def handler(**kwargs):
+                    try:
+                        result = transport.send_request(
+                            "tools/call",
+                            {"name": tn, "arguments": kwargs},
+                        )
+                        # 提取 content
+                        content = result.get("content", [])
+                        if content and isinstance(content, list):
+                            return "\n".join(
+                                item.get("text", str(item))
+                                for item in content
+                                if isinstance(item, dict)
+                            )
+                        return str(result)
+                    except Exception as exc:
+                        return f"Error: {type(exc).__name__}: {exc}"
+                return handler
+
+            handlers[tool_name] = make_handler(tool_name)
+
+        # 使用 register() 方法注册工具和 handlers
+        client.register(tool_defs, handlers)
+
+        # 添加到 registry
+        self.add_client(client)
+
     def set_policy(self, server: str, tool: str, policy: str) -> None:
         """
         设置宿主侧授权策略。
@@ -132,6 +217,24 @@ class MCPRegistry:
 
         self.tool_policies = policies
         return tools, handlers, policies
+
+    def cleanup(self) -> None:
+        """
+        清理所有连接的 MCP client。
+
+        关闭所有 transport 连接，清空注册表。
+        """
+        for client in self.clients.values():
+            # 如果 client 有 transport 属性（stdio），关闭它
+            if hasattr(client, 'transport'):
+                try:
+                    client.transport.close()
+                except Exception:
+                    pass  # 静默失败
+
+        self.clients.clear()
+        self.host_policy.clear()
+        self.tool_policies.clear()
 
 
 # 全局注册表（单例）

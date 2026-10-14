@@ -28,7 +28,7 @@ def result_hook(block: Any, output: str) -> None:
     print(f"{Color.GRAY}  [result] {str(output)[:200]}{Color.RESET}")
     return None
 
-
+# todo: 目前告警只是打印出来，没有进一步处理后续进行进一步优化
 def large_output_hook(block: Any, output: str) -> None:
     """PostToolUse：输出过大时告警。"""
     if len(str(output)) > LARGE_OUTPUT_THRESHOLD:

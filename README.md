@@ -22,7 +22,86 @@ Harness，胜过一个功能很多但无法信任的 Harness。
 - Python 3.12+
 - 一个 Anthropic 兼容的模型 API（Anthropic / GLM / Kimi / DeepSeek 等）
 
-## 安装
+## 快速开始
+
+### 安装
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/yourusername/myharness.git
+cd myharness
+
+# 2. 创建虚拟环境
+python -m venv .venv
+
+# 3. 激活虚拟环境
+# Windows
+.\.venv\Scripts\Activate.ps1
+# Linux/macOS
+source .venv/bin/activate
+
+# 4. 安装依赖
+pip install -r requirements.txt
+
+# 5. 配置 API Key
+cp .env.example .env
+# 编辑 .env 文件，填入你的 API Key
+```
+
+### 基本使用
+
+```bash
+# 启动交互式 CLI
+python -m myharness
+
+# 在对话中使用 Agent
+> 创建一个 Python 文件计算斐波那契数列
+```
+
+### 运行评测
+
+```bash
+# 运行完整评测套件
+python run_eval.py
+
+# 运行特定分类
+python run_eval.py --category basic
+
+# 与基线对比
+python run_eval.py --baseline .eval/reports/baseline.json --output .eval/reports/current.json
+```
+
+评测报告示例：
+```
+======================================================================
+Evaluation Summary
+======================================================================
+Total Tasks:     10
+Passed:          9 (90.0%)
+Failed:          1
+Avg Duration:    3.45s
+Avg Tokens:      1234
+P50 Duration:    2.8s
+P95 Duration:    6.2s
+Total Cost:      $0.0111
+
+Δ vs Baseline:
+  pass_rate_delta: +5.0
+  avg_tokens_delta: -150
+======================================================================
+```
+
+### 多 Agent 协作
+
+```python
+from myharness.tools import spawn_team, create_task, list_tasks
+
+# 在对话中使用
+> 启动 3 个 Agent 帮我处理这些任务
+# Agent 会调用：spawn_team(3)
+# 然后创建多个任务：create_task(...)
+# 查看进度：list_tasks()
+```
 
 ```sh
 python -m venv .venv
