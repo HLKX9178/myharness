@@ -43,6 +43,7 @@ class AgentWorker:
         agent_id: str,
         team_dir: Path,
         poll_interval: float = 1.0,
+        timeout_seconds: int = 300,
     ):
         """
         初始化 Agent 工作进程。
@@ -51,6 +52,9 @@ class AgentWorker:
             agent_id: Agent ID
             team_dir: 团队目录
             poll_interval: 轮询间隔（秒）
+            timeout_seconds: 任务超时时间（秒）。必须由 AgentManager 传进来 ——
+                子进程会重新构造 TaskBoard，用默认值会让「崩溃恢复」退化成
+                「等 300 秒」，配置在 manager 上改了也不生效。
         """
         self.agent_id = agent_id
         self.team_dir = team_dir
@@ -58,7 +62,10 @@ class AgentWorker:
         self._should_stop = False
 
         # 初始化共享基础设施
-        self.taskboard = TaskBoard(team_dir / "taskboard.jsonl")
+        self.taskboard = TaskBoard(
+            team_dir / "taskboard.jsonl",
+            timeout_seconds=timeout_seconds,
+        )
         self.message_queue = MessageQueue(team_dir / "messages")
 
         # 创建 TeamAgent
@@ -127,7 +134,12 @@ class AgentWorker:
                 # 例如：根据消息内容执行特定操作
 
 
-def run_worker(agent_id: str, team_dir: Path, poll_interval: float = 1.0) -> None:
+def run_worker(
+    agent_id: str,
+    team_dir: Path,
+    poll_interval: float = 1.0,
+    timeout_seconds: int = 300,
+) -> None:
     """
     启动 Agent 工作进程（进程入口函数）。
 
@@ -135,17 +147,19 @@ def run_worker(agent_id: str, team_dir: Path, poll_interval: float = 1.0) -> Non
         agent_id: Agent ID
         team_dir: 团队目录
         poll_interval: 轮询间隔（秒）
+        timeout_seconds: 任务超时时间（秒），与 AgentManager 保持一致
     """
-    worker = AgentWorker(agent_id, team_dir, poll_interval)
+    worker = AgentWorker(agent_id, team_dir, poll_interval, timeout_seconds)
     worker.run()
 
 
 if __name__ == "__main__":
     # 独立进程模式：从命令行参数读取配置
     if len(sys.argv) < 3:
-        print("用法: python -m myharness.teams.worker <agent_id> <team_dir>")
+        print("用法: python -m myharness.teams.worker <agent_id> <team_dir> [timeout_seconds]")
         sys.exit(1)
 
     agent_id = sys.argv[1]
     team_dir = Path(sys.argv[2])
-    run_worker(agent_id, team_dir)
+    timeout_seconds = int(sys.argv[3]) if len(sys.argv) > 3 else 300
+    run_worker(agent_id, team_dir, timeout_seconds=timeout_seconds)

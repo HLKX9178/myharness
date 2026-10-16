@@ -8,8 +8,8 @@
 
 设计：
 - 每个 TeamAgent 包装现有的 agent_loop
-- 工作目录：{team_dir}/agent_{agent_id}/workspace/
-- 会话目录：{team_dir}/agent_{agent_id}/sessions/
+- 工作目录：{team_dir}/{agent_id}/workspace/
+- 会话目录：{team_dir}/{agent_id}/sessions/
 - workspace 通过显式参数传递，不再使用全局状态
 """
 
@@ -59,8 +59,10 @@ class TeamAgent:
         self.taskboard = taskboard
         self.message_queue = message_queue
 
-        # 独立的工作目录
-        self.agent_dir = team_dir / f"agent_{agent_id}"
+        # 独立的工作目录。
+        # agent_id 本身已是完整标识（AgentManager 传的是 "agent_0"），
+        # 这里再拼一次 "agent_" 会得到 agent_agent_0 这种双层前缀。
+        self.agent_dir = team_dir / agent_id
         self.workspace = self.agent_dir / "workspace"
         self.session_dir = self.agent_dir / "sessions"
 
@@ -105,18 +107,7 @@ class TeamAgent:
             agent_loop(self.messages, workspace=self.workspace)
 
             # 4. 提取结果（最后一条 assistant 消息）
-            result = None
-            for msg in reversed(self.messages):
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", [])
-                    if isinstance(content, list):
-                        for block in content:
-                            if getattr(block, "type", None) == "text":
-                                result = block.text
-                                break
-                    elif isinstance(content, str):
-                        result = content
-                    break
+            result = self._extract_last_reply(self.messages)
 
             # 5. 标记任务完成
             self.taskboard.complete_task(task.task_id, self.agent_id, result)
@@ -139,6 +130,34 @@ class TeamAgent:
                 "task_id": task.task_id,
                 "error": error_msg,
             }
+
+    @staticmethod
+    def _extract_last_reply(messages: list) -> str | None:
+        """取最后一条 assistant 消息的文本内容。
+
+        agent_loop 在写回 messages 之前会把 content block 归一成 dict
+        （`block.model_dump()`），所以这里必须按 dict 解析。早期实现用
+        `getattr(block, "type")` 读属性，对 dict 永远取不到值 —— 表现为
+        任务正常完成，但 result 恒为 None。
+        """
+        for msg in reversed(messages):
+            if msg.get("role") != "assistant":
+                continue
+
+            content = msg.get("content", [])
+            if isinstance(content, str):
+                return content or None
+
+            texts = []
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        texts.append(block.get("text", ""))
+                elif getattr(block, "type", None) == "text":
+                    texts.append(getattr(block, "text", ""))
+            return "\n".join(texts) if texts else None
+
+        return None
 
     def send_message(self, to_agent: str, content: Any) -> str:
         """

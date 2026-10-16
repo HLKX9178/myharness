@@ -79,7 +79,7 @@ class AgentManager:
         """
         process = multiprocessing.Process(
             target=run_worker,
-            args=(agent_id, self.team_dir, self.poll_interval),
+            args=(agent_id, self.team_dir, self.poll_interval, self.timeout_seconds),
             name=agent_id,
         )
         process.start()

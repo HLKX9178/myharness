@@ -16,7 +16,7 @@ import glob
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from myharness import config
 from myharness.config import memory_store, skill_library
@@ -242,6 +242,12 @@ def connect_mcp(name: str, workspace: Path | None = None) -> str:
 _active_team = None
 
 
+def _preview(value: Any, limit: int = 100) -> str:
+    """把任务结果 / 错误信息截成一行预览（Task.result 是 Any，不一定是 str）。"""
+    text = str(value)
+    return text[:limit] + "..." if len(text) > limit else text
+
+
 def spawn_team(num_agents: int, workspace: Path | None = None) -> str:
     """
     启动多个 AI Agent 组成团队并行工作。
@@ -341,23 +347,31 @@ def list_tasks() -> str:
         if not tasks:
             return "No tasks in queue"
 
+        # 用枚举做键，而不是字符串字面量：TaskStatus 的成员名与取值
+        # 曾经对不上（"in_progress" vs "claimed"），字面量映射会静默退化成
+        # [UNKNOWN]，用枚举后这类错位在类型层面就不可能出现。
+        from myharness.teams.taskboard import TaskStatus
+
+        status_icon = {
+            TaskStatus.PENDING: "[PENDING]",
+            TaskStatus.CLAIMED: "[IN_PROGRESS]",
+            TaskStatus.COMPLETED: "[COMPLETED]",
+            TaskStatus.FAILED: "[FAILED]",
+        }
+
         lines = []
         for task in tasks:
-            status_icon = {
-                "pending": "[PENDING]",
-                "in_progress": "[IN_PROGRESS]",
-                "completed": "[COMPLETED]",
-                "failed": "[FAILED]"
-            }.get(task.status.value, "[UNKNOWN]")
-
-            lines.append(f"{status_icon} {task.title}")
+            lines.append(f"{status_icon.get(task.status, '[UNKNOWN]')} {task.title}")
 
             if task.claimed_by:
                 lines.append(f"   Agent: {task.claimed_by}")
 
-            if task.result:
-                result_preview = task.result[:100] + "..." if len(task.result) > 100 else task.result
-                lines.append(f"   Result: {result_preview}")
+            # 失败原因记在 error 字段，成功结果记在 result 字段
+            # （见 TaskBoard.fail_task / complete_task），两者不能混用。
+            if task.status is TaskStatus.FAILED and task.error:
+                lines.append(f"   Error: {_preview(task.error)}")
+            elif task.result:
+                lines.append(f"   Result: {_preview(task.result)}")
 
         return "\n".join(lines)
 
@@ -384,11 +398,15 @@ def get_task_result(task_id: str) -> str:
         if task is None:
             return f"Error: Task {task_id} not found"
 
-        if task.status.value == "completed":
+        from myharness.teams.taskboard import TaskStatus
+
+        if task.status is TaskStatus.COMPLETED:
             return f"Task completed:\n{task.result or '(no result)'}"
-        elif task.status.value == "failed":
-            return f"Task failed:\n{task.result or '(no error details)'}"
-        elif task.status.value == "in_progress":
+        elif task.status is TaskStatus.FAILED:
+            # fail_task 把原因写进 error 字段（result 保持 None），
+            # 只读 result 会让失败原因永远显示成 "(no error details)"。
+            return f"Task failed:\n{task.error or task.result or '(no error details)'}"
+        elif task.status is TaskStatus.CLAIMED:
             return f"Task still in progress (claimed by {task.claimed_by})"
         else:
             return f"Task pending (status: {task.status.value})"
@@ -413,7 +431,7 @@ def send_team_message(to_agent: str, content: str) -> str:
             return "Error: No active team"
 
         from_agent = "coordinator"  # 协调者（主 Agent）
-        message_id = _active_team.message_queue.send_message(
+        message_id = _active_team.message_queue.send(
             from_agent=from_agent,
             to_agent=to_agent,
             content=content
@@ -547,7 +565,7 @@ TOOLS = [
     },
     {
         "name": "list_tasks",
-        "description": "List all tasks in the team queue with their status (pending/in_progress/completed/failed).",
+        "description": "List all tasks in the team queue with their status (pending/claimed/completed/failed).",
         "input_schema": {
             "type": "object",
             "properties": {},
