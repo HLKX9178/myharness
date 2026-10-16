@@ -2,6 +2,7 @@
 
 from myharness.providers.base import BaseProvider, PROVIDER_REGISTRY
 from myharness.providers.anthropic import AnthropicProvider
+from myharness.providers.openai import OpenAIProvider
 
-__all__ = ["BaseProvider", "PROVIDER_REGISTRY", "AnthropicProvider"]
+__all__ = ["BaseProvider", "PROVIDER_REGISTRY", "AnthropicProvider", "OpenAIProvider"]
 

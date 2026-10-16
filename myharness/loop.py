@@ -15,15 +15,19 @@
   - 上下文压缩                  需要替换整个 messages 列表
   - 读取守卫状态并执行终止/注入    loop 层面的动作，策略由 guards.py 决定
   - 清空守卫跨轮状态             对话轮次的边界在本函数上
+  - 模型调用失败时收尾            重试与可重试性判定在 providers 层，
+                                这里只负责「本轮到此为止」并说清原因
 """
 
 from pathlib import Path
+from typing import Any
 
 from myharness.config import MAX_TOKENS, build_system_prompt, get_workdir, provider
 from myharness.context import ContextManager
 from myharness.dispatch import execute_tool
 from myharness.guards import failure_guard, reset_turn_state
 from myharness.hooks import trigger_hooks
+from myharness.providers.base import ProviderError
 from myharness.tools import assemble_tool_pool
 from myharness.ui import Color
 
@@ -32,6 +36,44 @@ MAX_TOTAL_TOKENS = 100000  # 本轮累计预算；单次请求上限见 config.M
 
 # 上下文管理器
 context_manager = ContextManager(max_messages=30)
+
+
+def _block_to_dict(block: Any) -> dict:
+    """把 provider 返回的 content block 归一成可序列化的 dict。
+
+    Anthropic SDK 的 block 是 pydantic 对象（自带 model_dump），OpenAI 适配层
+    返回的轻量对象也补了 model_dump。但 provider 契约只要求「有 type」——
+    无条件调用 model_dump() 等于把「必须长得像 pydantic」变成一条没写下来的
+    隐式约定，任何不满足它的 provider 都会让整轮对话崩掉。这里对 dict /
+    数据类 / 命名空间形态做兜底。
+    """
+    if isinstance(block, dict):
+        return block
+
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        return dump()
+
+    data = dict(vars(block)) if hasattr(block, "__dict__") else {}
+    if "type" not in data and hasattr(block, "type"):
+        # type 可能是类属性，不会出现在 vars() 里
+        data["type"] = block.type
+    return data
+
+
+def _report_provider_error(error: ProviderError) -> None:
+    """把模型调用失败的原因与修复建议讲清楚。
+
+    这是**诊断输出**，不是横切策略：什么算可重试、重试几次，都在 providers
+    层决定（见 providers/base.py）。这里只负责把已经定论的结果说给人听，
+    并保证 messages 不被写入半截状态 —— 失败时最后一条消息仍是用户输入，
+    下一轮可以直接重问同一个问题。
+    """
+    attempts = f"（已尝试 {error.attempts} 次）" if error.attempts > 1 else ""
+    print(f"{Color.RED}  [error] 模型调用失败{attempts}: {error.message}{Color.RESET}")
+    if error.hint:
+        print(f"{Color.RED}  [error] {error.hint}{Color.RESET}")
+    print(f"{Color.GRAY}  本轮已结束，历史保留，修正后可重新提问。{Color.RESET}")
 
 
 def agent_loop(messages: list, workspace: Path | None = None) -> None:
@@ -72,13 +114,23 @@ def agent_loop(messages: list, workspace: Path | None = None) -> None:
         # 每轮重新组装工具池：M4 接入 MCP 后，新工具下一轮即可见
         tools, handlers = assemble_tool_pool(workspace)
 
-        response = provider.chat(
-            messages=messages,
-            tools=tools,
-            system=system_prompt,
-            max_tokens=MAX_TOKENS,
-        )
-        messages.append({"role": "assistant", "content": response.content})
+        try:
+            response = provider.chat(
+                messages=messages,
+                tools=tools,
+                system=system_prompt,
+                max_tokens=MAX_TOKENS,
+            )
+        except ProviderError as error:
+            # providers 层已把 SDK 异常规范化（契约 4）。本轮无法继续，但必须
+            # **优雅结束**：把异常抛穿会让 CLI 崩掉，连尚未保存的会话一起丢掉。
+            # 只捕获 ProviderError —— 其它异常是代码缺陷，应当暴露出来。
+            _report_provider_error(error)
+            return
+
+        # 将 ContentBlock 转成字典（支持序列化）
+        content_dict = [_block_to_dict(block) for block in response.content]
+        messages.append({"role": "assistant", "content": content_dict})
 
         used = response.usage.input_tokens + response.usage.output_tokens
         total_tokens += used

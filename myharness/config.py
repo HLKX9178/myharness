@@ -47,12 +47,6 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         )
     return value
 
-    if value < minimum:
-        raise ValueError(
-            f"{name} must be >= {minimum}, got {value}. Fix {name} in .env."
-        )
-    return value
-
 
 def _env_dir(name: str, default: Path) -> Path:
     """读取目录型环境变量；未设置时返回 default，非法值直接报错。
@@ -152,15 +146,24 @@ if not ProviderClass:
         f"Available providers: {available}"
     )
 
-provider = ProviderClass(
-    model=MODEL,
-    api_key=os.getenv("ANTHROPIC_API_KEY")  # 未来可以根据 PROVIDER_TYPE 选择不同的 key
-)
-
-# 如果设置了自定义 base_url（目前仅支持 Anthropic）
-if PROVIDER_TYPE == "anthropic" and os.getenv("ANTHROPIC_BASE_URL"):
-    from anthropic import Anthropic
-    provider.client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+# 根据 Provider 类型选择对应的配置
+if PROVIDER_TYPE == "openai":
+    provider = ProviderClass(
+        model=MODEL,
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL"),  # 支持千问等兼容端点
+    )
+elif PROVIDER_TYPE == "anthropic":
+    provider = ProviderClass(
+        model=MODEL,
+        api_key=os.getenv("ANTHROPIC_API_KEY"),
+        # 自定义 base_url（如智谱 GLM）走构造参数。
+        # 以前这里是构造完再替换 provider.client，那条支路会丢掉
+        # 构造时设置的超时与 max_retries —— 换端点就等于换了一套故障表现。
+        base_url=os.getenv("ANTHROPIC_BASE_URL"),
+    )
+else:
+    provider = ProviderClass(model=MODEL)
 
 # 装配内置 hook（权限、审计、日志、记忆检索、Stop、自动提取记忆）。
 # 必须在 provider 之后，因为 extract_memories_hook 需要调用模型。
