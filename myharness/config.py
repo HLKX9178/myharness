@@ -25,6 +25,15 @@ if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 
+class ConfigError(ValueError):
+    """配置缺失或非法 —— 启动期就暴露，不给「先跑起来再说」留余地。
+
+    单独成类（而不是裸 ValueError）是为了让 `__main__` 能把它渲染成一条
+    可读提示。刚克隆完仓库的人最可能缺的正是这几项，把 traceback 甩给他
+    等于什么都没说。继承 ValueError，因为它确实描述的是「配置的取值不对」。
+    """
+
+
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
     """读取整型环境变量；未设置时返回 default，非法值直接报错。
 
@@ -37,13 +46,13 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     try:
         value = int(raw.strip())
     except ValueError:
-        raise ValueError(
-            f"{name} must be an integer, got {raw!r}. "
-            f"Fix {name} in .env (for example {name}={default})."
+        raise ConfigError(
+            f"{name} 必须是整数，当前值是 {raw!r}。"
+            f"请在 .env 中修正（例如 {name}={default}）。"
         ) from None
     if value < minimum:
-        raise ValueError(
-            f"{name} must be >= {minimum}, got {value}. Fix {name} in .env."
+        raise ConfigError(
+            f"{name} 必须 >= {minimum}，当前值是 {value}。请在 .env 中修正。"
         )
     return value
 
@@ -58,11 +67,29 @@ def _env_dir(name: str, default: Path) -> Path:
         return default
     path = Path(raw.strip()).expanduser().resolve()
     if not path.is_dir():
-        raise ValueError(
-            f"{name} must be an existing directory, got {path}. "
-            f"Create it first, or fix {name} in .env."
+        raise ConfigError(
+            f"{name} 必须是一个已存在的目录，当前值是 {path}。"
+            f"请先创建该目录，或在 .env 中修正 {name}。"
         )
     return path
+
+
+def _require_env(name: str, hint: str) -> str:
+    """读取必填环境变量；缺失时给出「缺什么 + 去哪补」。
+
+    **首次部署最容易漏的一步就是把 .env.example 复制成 .env。** 这种情况下
+    `os.environ[name]` 抛出的裸 KeyError 只说明「少了这一项」，不说明该在哪填、
+    该填成什么样 —— 而这恰恰是新用户唯一需要知道的事。
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        raise ConfigError(
+            f"{name} 未设置 —— {hint}\n"
+            f"修复：在仓库根目录（即 README.md 所在目录）创建 .env 并填入该项：\n"
+            f"    cp .env.example .env        # Windows: copy .env.example .env\n"
+            f"若 .env 已存在，说明里面缺少或注释掉了这一行。"
+        )
+    return raw.strip()
 
 
 # Agent 的工作目录。默认为仓库根；设置环境变量 WORKDIR 可指向别处，
@@ -123,8 +150,11 @@ def use_workdir(path: Path | str):
 memory_store = MemoryStore(MEMORY_DIR)
 
 # Provider 配置（必须在 install_default_hooks 之前，因为提取 hook 需要 provider）
-PROVIDER_TYPE = os.getenv("PROVIDER", "anthropic")  # 默认使用 Anthropic
-MODEL = os.environ["MODEL_ID"]
+PROVIDER_TYPE = (os.getenv("PROVIDER") or "anthropic").strip()
+MODEL = _require_env(
+    "MODEL_ID",
+    "它是模型的名字，例如 claude-sonnet-4-6 / qwen-plus / glm-4-flash。",
+)
 
 # 单次模型回复的 token 上限（Anthropic API 的 max_tokens 参数）。
 #
@@ -141,9 +171,25 @@ MAX_TOKENS = _env_int("MAX_TOKENS", DEFAULT_MAX_TOKENS)
 ProviderClass = PROVIDER_REGISTRY.get(PROVIDER_TYPE)
 if not ProviderClass:
     available = ", ".join(PROVIDER_REGISTRY.keys())
-    raise ValueError(
-        f"Unknown provider: '{PROVIDER_TYPE}'. "
-        f"Available providers: {available}"
+    raise ConfigError(
+        f"未知的 PROVIDER: '{PROVIDER_TYPE}'。可选值：{available}。"
+        f"请在 .env 中修正 PROVIDER。"
+    )
+
+# 凭据在启动时就检查，不推迟到第一次请求。
+#
+# openai SDK 会在构造 client 时直接抛 OpenAIError，那是一个 import 期的裸
+# traceback；anthropic SDK 则放行到请求时才失败，于是错误出现在「问了一句话
+# 之后」，更难定位。两者都换成一句「缺哪个变量、去哪填」。
+_REQUIRED_CREDENTIAL = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+_credential = _REQUIRED_CREDENTIAL.get(PROVIDER_TYPE)
+if _credential:
+    _require_env(
+        _credential,
+        f"PROVIDER={PROVIDER_TYPE} 用它作为 API 凭据（第三方兼容端点见 .env.example 注释）。",
     )
 
 # 根据 Provider 类型选择对应的配置

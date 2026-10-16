@@ -1,10 +1,14 @@
 """配置解析测试。
 
-重点：MAX_TOKENS 必须可配置，且非法值必须显式报错而不是静默回退 ——
-否则「设了却没生效」这类问题无法诊断。
+重点有三：
+1. MAX_TOKENS 必须可配置，且非法值必须显式报错而不是静默回退 ——
+   否则「设了却没生效」这类问题无法诊断。
+2. 配置错误必须**可操作**：说清缺什么、去哪补。
+3. 首次部署（没有 .env）不能甩 traceback。
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,8 +21,10 @@ from myharness.config import (
     DEFAULT_MAX_TOKENS,
     MAX_TOKENS,
     REPO_ROOT,
+    ConfigError,
     _env_dir,
     _env_int,
+    _require_env,
 )
 
 
@@ -48,31 +54,74 @@ def test_env_int_tolerates_surrounding_whitespace(monkeypatch):
 
 def test_env_int_rejects_non_integer(monkeypatch):
     monkeypatch.setenv("MYHARNESS_TEST_INT", "8k")
-    with pytest.raises(ValueError, match="MYHARNESS_TEST_INT must be an integer"):
+    with pytest.raises(ConfigError, match="必须是整数"):
         _env_int("MYHARNESS_TEST_INT", 8000)
 
 
 def test_env_int_rejects_below_minimum(monkeypatch):
     monkeypatch.setenv("MYHARNESS_TEST_INT", "0")
-    with pytest.raises(ValueError, match="must be >= 1"):
+    with pytest.raises(ConfigError, match="必须 >= 1"):
         _env_int("MYHARNESS_TEST_INT", 8000)
 
 
 def test_env_int_rejects_negative(monkeypatch):
     monkeypatch.setenv("MYHARNESS_TEST_INT", "-1")
-    with pytest.raises(ValueError, match="must be >= 1"):
+    with pytest.raises(ConfigError, match="必须 >= 1"):
         _env_int("MYHARNESS_TEST_INT", 8000)
 
 
 def test_error_message_tells_how_to_fix(monkeypatch):
     """错误信息必须包含「如何修正」：变量名 + 合法示例。"""
     monkeypatch.setenv("MYHARNESS_TEST_INT", "abc")
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(ConfigError) as excinfo:
         _env_int("MYHARNESS_TEST_INT", 8000)
     message = str(excinfo.value)
     assert "MYHARNESS_TEST_INT" in message
     assert ".env" in message
     assert "8000" in message
+
+
+def test_config_error_is_a_value_error():
+    """ConfigError 继承 ValueError —— 配置取值不对本来就是 ValueError。
+
+    这样既能让 __main__ 单独识别并渲染提示，又不会让「本来就是
+    ValueError」的调用方突然接不住。
+    """
+    assert issubclass(ConfigError, ValueError)
+
+
+# ============================================================
+# _require_env：必填项的报错必须可操作
+# ============================================================
+
+def test_require_env_returns_stripped_value(monkeypatch):
+    monkeypatch.setenv("MYHARNESS_TEST_REQ", "  value  ")
+    assert _require_env("MYHARNESS_TEST_REQ", "用途说明") == "value"
+
+
+def test_require_env_rejects_unset(monkeypatch):
+    monkeypatch.delenv("MYHARNESS_TEST_REQ", raising=False)
+    with pytest.raises(ConfigError, match="MYHARNESS_TEST_REQ"):
+        _require_env("MYHARNESS_TEST_REQ", "用途说明")
+
+
+def test_require_env_treats_blank_as_unset(monkeypatch):
+    """`MODEL_ID=`（值为空）与完全没写同等对待。"""
+    monkeypatch.setenv("MYHARNESS_TEST_REQ", "   ")
+    with pytest.raises(ConfigError, match="未设置"):
+        _require_env("MYHARNESS_TEST_REQ", "用途说明")
+
+
+def test_require_env_message_says_where_to_put_it(monkeypatch):
+    """缺失必填项时，信息里必须带「怎么补」—— 这是首次部署唯一需要知道的事。"""
+    monkeypatch.delenv("MYHARNESS_TEST_REQ", raising=False)
+    with pytest.raises(ConfigError) as excinfo:
+        _require_env("MYHARNESS_TEST_REQ", "它是模型的名字")
+    message = str(excinfo.value)
+    assert "MYHARNESS_TEST_REQ" in message
+    assert "它是模型的名字" in message
+    assert ".env.example" in message      # 从哪复制模板
+    assert "cp .env.example .env" in message
 
 
 # ============================================================
@@ -141,7 +190,7 @@ def test_env_dir_reads_existing_directory(monkeypatch, tmp_path):
 def test_env_dir_rejects_missing_directory(monkeypatch, tmp_path):
     """目录不存在就报错，否则会被静默接受成一个写不进去的工作区。"""
     monkeypatch.setenv("MYHARNESS_TEST_DIR", str(tmp_path / "nope"))
-    with pytest.raises(ValueError, match="existing directory"):
+    with pytest.raises(ConfigError, match="已存在的目录"):
         _env_dir("MYHARNESS_TEST_DIR", tmp_path)
 
 
@@ -174,3 +223,45 @@ def test_workdir_env_var_is_honoured(tmp_path):
 
     line = next(l for l in proc.stdout.splitlines() if l.startswith("WORKDIR="))
     assert Path(line.split("=", 1)[1]) == target.resolve()
+
+
+# ============================================================
+# 首次部署：没有 .env 时必须给提示，不能甩 traceback
+# ============================================================
+
+def test_missing_env_is_reported_without_traceback(tmp_path):
+    """新机器 clone 完忘了建 .env，拿到的应该是提示而不是回溯。
+
+    这是真实踩过的坑：裸 `KeyError: 'MODEL_ID'` 只说少了这一项，不说该在哪填、
+    填成什么样 —— 而这正是新用户唯一需要知道的事。
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shutil.copytree(REPO_ROOT / "myharness", repo / "myharness")
+
+    # 清掉可能从当前环境继承来的配置，确保走的是「什么都没有」这条路径
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("PROVIDER", "MODEL_ID", "OPENAI_", "ANTHROPIC_"))
+    }
+    env["PYTHONPATH"] = str(repo)
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "myharness"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        cwd=str(repo),
+        stdin=subprocess.DEVNULL,
+        timeout=180,
+    )
+
+    output = proc.stdout + proc.stderr
+    assert "Traceback" not in output, output
+    assert "配置错误" in output
+    assert "MODEL_ID" in output
+    assert ".env.example" in output      # 告诉人模板在哪、怎么复制
+    assert proc.returncode == 2          # 非 0 且与「崩溃(1)」区分开
