@@ -60,21 +60,50 @@ Harness，胜过一个功能很多但无法信任的 Harness。
 ```bash
 git clone https://github.com/HLKX9178/myharness.git
 cd myharness
-
 python -m venv .venv
+```
 
-# Windows
-.venv\Scripts\activate
+激活虚拟环境 —— **不同 shell 用的脚本不一样**，用错会出现
+`无法加载模块".venv"` 之类的报错：
+
+```powershell
+# PowerShell（注意开头的 .\ 和 .ps1 后缀，两个都不能少）
+.\.venv\Scripts\Activate.ps1
+```
+
+```bat
+REM cmd.exe
+.venv\Scripts\activate.bat
+```
+
+```bash
+# Git Bash / WSL
+source .venv/Scripts/activate
 # Linux / macOS
 source .venv/bin/activate
+```
 
+然后安装依赖：
+
+```bash
 pip install -r requirements.txt
 ```
+
+> **不想折腾激活？** 直接用虚拟环境里的解释器，可以完全绕开各 shell 的差异
+> —— `run.bat` 就是这么做的：
+>
+> ```bash
+> .venv\Scripts\python.exe -m pip install -r requirements.txt
+> .venv\Scripts\python.exe -m myharness
+> ```
+>
+> PowerShell 若提示「禁止运行脚本」，说明执行策略限制了 `Activate.ps1`；
+> 用上面这种不激活的方式即可，不需要改系统策略。
 
 ### 2. 配置
 
 ```bash
-cp .env.example .env
+cp .env.example .env          # Windows cmd: copy .env.example .env
 ```
 
 编辑 `.env`，**至少**填入 API Key 与模型 ID：
@@ -86,6 +115,16 @@ ANTHROPIC_API_KEY=sk-your-key-here
 ```
 
 > `.env` 与 `.env.*` 均已被 `.gitignore` 排除。**切勿提交任何密钥。**
+
+忘了创建 `.env`、或漏填必需项时，启动会**立刻**给出一条提示并退出（退出码 2），
+而不是抛 traceback 或等到第一次请求才失败：
+
+```
+[配置错误] MODEL_ID 未设置 —— 它是模型的名字，例如 claude-sonnet-4-6 / qwen-plus / glm-4-flash。
+修复：在仓库根目录（即 README.md 所在目录）创建 .env 并填入该项：
+    cp .env.example .env        # Windows: copy .env.example .env
+若 .env 已存在，说明里面缺少或注释掉了这一行。
+```
 
 ### 3. 运行
 
