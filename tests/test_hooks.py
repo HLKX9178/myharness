@@ -151,6 +151,21 @@ def test_unknown_tool_returns_string_not_exception():
     assert "Unknown tool" in out
 
 
+def test_unknown_tool_still_notifies_posttooluse():
+    """未知工具也必须流经 PostToolUse。
+
+    回归目标：之前这里是 `return f"Unknown tool: ..."`，直接跳过了
+    PostToolUse —— 审计与告警完全收不到「模型调用了一个不存在的工具」
+    这件事，而这恰恰是最该被看见的一类异常。
+    """
+    seen = []
+    hooks.register_hook("PostToolUse", lambda b, o: seen.append(o))
+
+    out = dispatch.execute_tool(make_block("nope"), {})
+
+    assert seen == [out]
+
+
 def test_handler_exception_becomes_error_string():
     """契约 4：错误是数据，不是异常。"""
     def boom(**kwargs):

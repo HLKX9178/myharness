@@ -18,7 +18,25 @@ from types import SimpleNamespace
 import pytest
 
 from myharness import config, hooks, loop
-from myharness.teams import AgentManager, TaskBoard, MessageQueue
+from myharness.teams import AgentManager, TaskBoard, MessageQueue, TaskStatus
+
+
+# 子进程冷启动要 import 整个 myharness（含 provider、MemoryStore、SkillLibrary
+# 的构造），实测 3~4 秒，慢机器更久。这里统一用轮询代替固定 sleep ——
+# 固定 sleep 只会让这些用例在慢机器上随机变红。
+WORKER_BOOT_TIMEOUT = 45.0
+POLL_INTERVAL = 0.05
+
+
+def _wait_until(predicate, timeout: float = WORKER_BOOT_TIMEOUT,
+                interval: float = POLL_INTERVAL) -> bool:
+    """轮询等待 predicate() 为真；超时返回最后一次求值结果。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
 
 
 @pytest.fixture
@@ -91,17 +109,16 @@ class TestAgentOrchestration:
             manager.start_team()
 
             # 等待任务被认领（不是完成）
-            time.sleep(2)
+            def any_claimed() -> bool:
+                return any(
+                    t.status is not TaskStatus.PENDING
+                    for t in manager.taskboard.list_tasks()
+                )
 
-            # 验证：至少有任务被认领
-            tasks = manager.taskboard.list_tasks()
-            claimed_or_completed = [
-                t for t in tasks
-                if t.status.value in ["claimed", "completed", "failed"]
-            ]
-
-            # 至少有一个任务被认领
-            assert len(claimed_or_completed) >= 1, f"没有任务被认领: {[t.status for t in tasks]}"
+            assert _wait_until(any_claimed), (
+                f"没有任务被认领: "
+                f"{[t.status for t in manager.taskboard.list_tasks()]}"
+            )
 
         finally:
             manager.stop_team()
@@ -111,6 +128,10 @@ class TestAgentOrchestration:
         测试：Agent 崩溃后，任务被其他 Agent 接管。
 
         M6 验收标准 1：某个 Agent 崩溃后，其认领的任务能被其他成员接管。
+
+        时序说明：认领写在 agent_loop 之前，而 agent_loop 里至少有一次模型
+        往返，所以「已认领」窗口足够宽，轮询一定捕捉得到 —— 不再用固定
+        sleep 去赌子进程的启动耗时。
         """
         # 设置短超时（3秒）以便快速测试
         manager = AgentManager(team_dir, num_agents=2, timeout_seconds=3)
@@ -122,40 +143,41 @@ class TestAgentOrchestration:
             # 启动 2 个 Agent
             manager.start_team()
 
-            # 等待任务被认领
-            time.sleep(1)
-
-            # 检查任务被认领
-            task = manager.taskboard.get_task(task_id)
-            if task.status.value != "claimed":
-                # 可能还没来得及认领，再等一下
-                time.sleep(1)
+            def claimed() -> bool:
                 task = manager.taskboard.get_task(task_id)
+                return task is not None and task.status is TaskStatus.CLAIMED
 
-            assert task.status.value == "claimed", f"任务未被认领: {task.status}"
-            original_claimer = task.claimed_by
+            assert _wait_until(claimed), (
+                f"任务未被任何 worker 认领: "
+                f"{manager.taskboard.get_task(task_id).status}"
+            )
+            original_claimer = manager.taskboard.get_task(task_id).claimed_by
 
             # 杀死认领任务的 Agent（模拟崩溃）
             killed = manager.kill_agent(original_claimer)
             assert killed, f"未能杀死 {original_claimer}"
 
-            # 等待超时（3秒）+ 缓冲时间
-            time.sleep(4)
-
-            # 验证：任务被另一个 Agent 重新认领
-            task = manager.taskboard.get_task(task_id)
-
-            # 任务应该被重新认领或完成
-            assert task.status.value in ["claimed", "completed", "failed"]
-
-            if task.status.value == "claimed":
-                # 检查是否被另一个 Agent 接管
+            # 超时（3s）之后，任务必须能从「已死亡的认领者」手里被接管。
+            #
+            # 方法上刻意不依赖幸存 worker 的内部状态：worker 会发起真实模型
+            # 调用（SDK 默认没有请求超时），它可能正卡在某次调用里而迟迟不去
+            # 轮询 —— 那不是本用例要验的东西。所以这里除了观察表，还直接由
+            # 测试进程尝试认领一次：能认领到，就证明死掉的 agent 没有把任务
+            # 永久锁住（M6 验收标准 1）。
+            def taken_over() -> bool:
+                task = manager.taskboard.get_task(task_id)
+                if task is None:
+                    return False
+                if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                    return True
                 if task.claimed_by != original_claimer:
-                    print(f"✓ 任务从 {original_claimer} 转移到 {task.claimed_by}")
-                else:
-                    # 可能是超时后还没有其他 Agent 来认领
-                    # 但至少验证了超时机制有效
-                    print(f"✓ 任务超时，等待其他 Agent 接管")
+                    return True
+                return manager.taskboard.claim_task("recovery_probe") is not None
+
+            assert _wait_until(taken_over, timeout=30), (
+                f"崩溃的 {original_claimer} 仍占着任务: "
+                f"taskboard={manager.taskboard.get_task(task_id)}"
+            )
 
         finally:
             manager.stop_team()
@@ -172,17 +194,23 @@ class TestAgentOrchestration:
 
         try:
             manager.start_team()
-            time.sleep(1)  # 等待 Agent 启动
 
-            # 验证：每个 Agent 有独立的工作区
-            agent_0_workspace = team_dir / "agent_agent_0" / "workspace"
-            agent_1_workspace = team_dir / "agent_agent_1" / "workspace"
+            # 布局：{team_dir}/{agent_id}/workspace（见 TeamAgent.__init__）
+            agent_0_workspace = team_dir / "agent_0" / "workspace"
+            agent_1_workspace = team_dir / "agent_1" / "workspace"
 
-            assert agent_0_workspace.exists(), "Agent 0 workspace 不存在"
-            assert agent_1_workspace.exists(), "Agent 1 workspace 不存在"
-            assert agent_0_workspace != agent_1_workspace, "工作区未隔离"
+            # workspace 在子进程启动时（TeamAgent.__init__）就建好，早于任何
+            # 模型调用，所以这里只需要等目录出现，不需要等任务执行
+            assert _wait_until(
+                lambda: agent_0_workspace.exists() and agent_1_workspace.exists()
+            ), (
+                "工作区未就绪: "
+                f"agent_0={agent_0_workspace.exists()} "
+                f"agent_1={agent_1_workspace.exists()}"
+            )
 
             # 验证：工作区在不同的目录
+            assert agent_0_workspace != agent_1_workspace, "工作区未隔离"
             assert agent_0_workspace.parent != agent_1_workspace.parent
 
         finally:
@@ -294,6 +322,19 @@ class TestAgentWorker:
         assert worker.team_dir == team_dir
         assert worker.poll_interval == 0.5
         assert worker.agent.workspace.exists()
+
+    def test_worker_inherits_task_timeout(self, team_dir):
+        """Worker 必须沿用 AgentManager 传下来的任务超时时间。
+
+        回归目标：子进程会重新构造 TaskBoard，漏传 timeout_seconds 时它会
+        回退到默认 300 秒 —— manager 上把超时调成 3 秒完全不生效，
+        「崩溃恢复」实际要等 5 分钟。
+        """
+        from myharness.teams.worker import AgentWorker
+
+        worker = AgentWorker("test_agent", team_dir, timeout_seconds=3)
+
+        assert worker.taskboard.timeout_seconds == 3
 
     def test_signal_handling(self, team_dir):
         """测试：信号处理。"""
