@@ -36,7 +36,12 @@ def execute_tool(
 
     handler = handlers.get(block.name)
     if not handler:
-        return f"Unknown tool: {block.name}"
+        # 未知工具同样是一条「执行结果」，必须流经 PostToolUse：
+        # 直接 return 会让审计/告警收不到这次事件，而「模型调用了一个
+        # 不存在的工具」恰恰是最该被看见的一类异常。
+        output = f"Error: Unknown tool: {block.name}"
+        trigger_all_hooks("PostToolUse", block, output, workspace=workspace)
+        return output
 
     try:
         # 尝试传入 workspace 参数
