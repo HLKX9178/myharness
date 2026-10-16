@@ -1,5 +1,7 @@
 anthropic>=1.2.0
+openai>=1.0.0
 python-dotenv>=1.0.0
+croniter>=2.0.0
 
 # 开发依赖
 pytest>=8.0
