@@ -304,53 +304,6 @@ from myharness.tools import spawn_team, create_task, list_tasks
 
 ---
 
-## 测试
-
-```bash
-pytest tests/                 # 全量
-pytest tests/test_hooks.py    # 单个文件
-```
-
-覆盖点包括：Hook 语义与架构约束、工具契约、权限与命令安全、上下文压缩、
-会话持久化、MCP、调度与持久化、多 Agent 编排与崩溃恢复、Provider 错误归一。
-
-> 多 Agent 相关用例会启动真实子进程，子进程冷启动需要数秒，
-> 因此这些用例采用轮询等待而非固定 sleep。全量约 30～60 秒。
-
----
-
-## 评测
-
-```bash
-python run_eval.py                          # 全部任务
-python run_eval.py --category basic         # 指定分类
-python run_eval.py --baseline .eval/reports/baseline.json \
-                   --output .eval/reports/current.json
-```
-
-报告包含任务集规模、通过率、平均成本、P50/P95 延迟，以及相对基线的增量：
-
-```
-======================================================================
-Evaluation Summary
-======================================================================
-Total Tasks:     10
-Passed:          9 (90.0%)
-Failed:          1
-Avg Duration:    3.45s
-Avg Tokens:      1234
-P50 Duration:    2.8s
-P95 Duration:    6.2s
-Total Cost:      $0.0111
-
-Δ vs Baseline:
-  pass_rate_delta: +5.0
-  avg_tokens_delta: -150
-======================================================================
-```
-
----
-
 ## 目录结构
 
 ```text
