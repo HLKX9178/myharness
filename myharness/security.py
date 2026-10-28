@@ -442,7 +442,13 @@ def permission_hook(block: Any, workspace: Path | None = None) -> str | None:
         target = str(policy.workspace / raw)
         allowed, reason = policy.check_path(policy.workspace / raw)
     else:
-        # 没有对应策略的工具（例如 glob_files）默认放行
+        # 没有对应策略的工具默认放行：glob_files、技能/记忆工具，
+        # 以及所有 mcp__* 外部工具。
+        #
+        # MCP 工具目前**没有**任何宿主侧限制。早期 MCPRegistry 为每个 MCP
+        # 工具算过 allow / confirm / deny，但那份结果没有任何调用方读取，
+        # dispatch 也从不检查 —— 属于「看起来有权限控制」的死代码，已删除。
+        # 要收紧外部工具，就在这个分支里按 block.name 判定，别绕回注册表。
         return None
 
     get_audit_logger().log_decision(

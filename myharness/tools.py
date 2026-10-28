@@ -444,6 +444,110 @@ def send_team_message(to_agent: str, content: str) -> str:
 
 
 # ============================================================
+# 定时任务
+# ============================================================
+#
+# 调度任务的内容是「提示词」而不是函数指针：到期时在独立进程里跑一轮完整的
+# agent。任务只在 `python -m myharness --run-jobs` 常驻的进程里执行 —— 交互式
+# 会话不启动调度线程，因为 agent_loop 依赖若干进程级状态，前台跑一轮的同时后台
+# 再跑一轮会互相污染（见 runtime/runner.py）。
+
+def schedule_task(
+    name: str,
+    cron_expr: str,
+    prompt: str,
+    workspace: Path | None = None,
+) -> str:
+    """
+    登记一条定时任务。
+
+    Args:
+        name: 任务名称（同名视为更新，不会重复登记）
+        cron_expr: Cron 表达式（标准 5 字段）
+        prompt: 到期时交给 agent 的提示词
+        workspace: 工作目录，默认当前会话的工作目录
+
+    Returns:
+        登记结果（含 task_id 与下次触发时间）
+    """
+    try:
+        from myharness.runtime import scheduler as runtime_scheduler
+
+        task_id = runtime_scheduler.schedule_task(
+            name=name,
+            cron_expr=cron_expr,
+            prompt=prompt,
+            workspace=_get_workdir(workspace),
+        )
+        task = runtime_scheduler.get_scheduler().get(task_id)
+
+        return (
+            f"Scheduled: {task_id} name={name} cron={cron_expr} "
+            f"next_run={task.next_run}\n"
+            f"Runs only while the runner is alive: python -m myharness --run-jobs"
+        )
+
+    except Exception as exc:
+        return f"Error: Failed to schedule task: {type(exc).__name__}: {exc}"
+
+
+def list_schedules() -> str:
+    """
+    列出已登记的定时任务及其最近一次运行结果。
+
+    Returns:
+        任务列表（文本格式）
+    """
+    try:
+        from myharness.runtime import scheduler as runtime_scheduler
+
+        tasks = runtime_scheduler.get_scheduler().list_tasks()
+        if not tasks:
+            return "No scheduled tasks"
+
+        lines = []
+        for task in tasks:
+            state = "enabled" if task.enabled else "disabled"
+            lines.append(
+                f"{task.task_id} [{state}] {task.name} cron={task.cron_expr} "
+                f"next_run={task.next_run}"
+            )
+            if task.last_status:
+                lines.append(f"   last: {task.last_status} at {task.last_run}")
+            if task.last_error:
+                lines.append(f"   error: {_preview(task.last_error)}")
+            elif task.last_result:
+                lines.append(f"   result: {_preview(task.last_result)}")
+            lines.append(f"   prompt: {_preview(task.prompt)}")
+
+        return "\n".join(lines)
+
+    except Exception as exc:
+        return f"Error: Failed to list schedules: {type(exc).__name__}: {exc}"
+
+
+def cancel_schedule(ref: str) -> str:
+    """
+    取消一条定时任务。
+
+    Args:
+        ref: 任务 ID 或任务名称
+
+    Returns:
+        状态信息
+    """
+    try:
+        from myharness.runtime import scheduler as runtime_scheduler
+
+        if not runtime_scheduler.get_scheduler().cancel(ref):
+            return f"Error: No such scheduled task: {ref}"
+        return f"Cancelled scheduled task: {ref}"
+
+    except Exception as exc:
+        return f"Error: Failed to cancel schedule: {type(exc).__name__}: {exc}"
+
+
+# ============================================================
 # 定义（给模型看的说明书）
 # ============================================================
 
@@ -603,6 +707,54 @@ TOOLS = [
             "required": ["to_agent", "content"],
         },
     },
+    {
+        "name": "schedule_task",
+        "description": (
+            "Schedule a prompt to be run by this agent on a cron schedule. "
+            "The prompt runs in a fresh session by `python -m myharness --run-jobs`. "
+            "Scheduling the same name again updates the existing entry."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Unique job name (reuse a name to update it)",
+                },
+                "cron_expr": {
+                    "type": "string",
+                    "description": "Standard 5-field cron expression, e.g. '0 9 * * 1-5'",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Self-contained prompt to execute when the job fires",
+                },
+            },
+            "required": ["name", "cron_expr", "prompt"],
+        },
+    },
+    {
+        "name": "list_schedules",
+        "description": "List scheduled jobs with their next run time and last result.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "cancel_schedule",
+        "description": "Cancel a scheduled job by its name or id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "Job name or task id",
+                },
+            },
+            "required": ["ref"],
+        },
+    },
 ]
 
 # 实现：工具名 -> 函数。必须与 TOOLS 一一对应。
@@ -619,6 +771,9 @@ TOOL_HANDLERS = {
     "list_tasks": list_tasks,
     "get_task_result": get_task_result,
     "send_team_message": send_team_message,
+    "schedule_task": schedule_task,
+    "list_schedules": list_schedules,
+    "cancel_schedule": cancel_schedule,
 }
 
 
@@ -652,7 +807,7 @@ def assemble_tool_pool(workspace: Path | None = None) -> tuple[list[dict], dict[
     # 4. MCP 工具（动态合并）
     registry = get_registry()
     try:
-        tools, handlers, _policies = registry.assemble_tool_pool(
+        tools, handlers = registry.assemble_tool_pool(
             builtin_tools, builtin_handlers
         )
     except Exception as exc:

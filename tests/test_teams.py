@@ -356,7 +356,7 @@ class TestTeamAgent:
             def __init__(self):
                 self.turn = 0
 
-            def chat(self, messages, tools, system, max_tokens):
+            def chat(self, messages, tools, system, max_tokens, on_text=None):
                 self.turn += 1
                 if self.turn == 1:
                     content = [

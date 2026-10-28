@@ -12,6 +12,32 @@ from pathlib import Path
 from typing import Any
 
 
+def _preview(messages: list[dict[str, Any]], limit: int = 60) -> str:
+    """取第一条用户消息的前若干字符，用于在会话列表里辨认。
+
+    列表只给 ID 和时间戳等于没给：同一个问题的多次重问、恢复过的旧会话，
+    肉眼分不出来。
+    """
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = " ".join(
+                str(block.get("text", ""))
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        else:
+            text = ""
+        text = " ".join(text.split())
+        if text:
+            return text[:limit]
+    return ""
+
+
 class Session:
     """会话管理：持久化对话历史。"""
 
@@ -109,22 +135,29 @@ class Session:
         return session
 
     @classmethod
-    def list_sessions(cls, session_dir: Path) -> list[dict[str, str]]:
+    def list_sessions(cls, session_dir: Path) -> list[dict[str, Any]]:
         """
         列出所有会话。
 
         Returns:
-            会话列表：[{"id": "session_xxx", "created_at": "...", "updated_at": "..."}]
+            会话列表，按更新时间倒序：
+            [{"id", "created_at", "updated_at", "message_count", "preview"}]
+
+            preview 取第一条用户消息的前 60 个字符 —— 只有 ID 和时间戳的话，
+            38 个存档摆在面前根本认不出哪条是想要的。
         """
         sessions = []
         for file in session_dir.glob("session_*.json"):
             try:
                 with file.open("r", encoding="utf-8") as f:
                     data = json.load(f)
+                messages = data.get("messages") or []
                 sessions.append({
                     "id": data["session_id"],
                     "created_at": data["metadata"]["created_at"],
                     "updated_at": data["metadata"]["updated_at"],
+                    "message_count": len(messages),
+                    "preview": _preview(messages),
                 })
             except Exception:
                 continue  # 跳过损坏的会话文件

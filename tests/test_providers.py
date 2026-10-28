@@ -213,6 +213,374 @@ def test_empty_tools_are_sent_as_none():
 
 
 # ============================================================
+# 工具调用参数：截断与坏 JSON 必须归一成 ProviderError
+# ============================================================
+
+def _tool_completion(name: str, arguments: str, *, finish_reason="tool_calls"):
+    """带一个 tool_call 的 OpenAI 响应替身。"""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_1",
+                            type="function",
+                            function=SimpleNamespace(name=name, arguments=arguments),
+                        )
+                    ],
+                ),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+
+
+def test_tool_call_arguments_are_parsed():
+    """正常路径：arguments 里的 JSON 被解析成 dict。"""
+    client = FakeClient([_tool_completion("write_file", '{"path": "a.py", "content": "x"}')])
+    response = _chat(_provider(client))
+
+    block = response.content[0]
+    assert block.type == "tool_use"
+    assert block.input == {"path": "a.py", "content": "x"}
+
+
+def test_empty_tool_arguments_become_empty_dict():
+    """部分端点在无参数工具上给空字符串，不能当成 JSON 错误。"""
+    client = FakeClient([_tool_completion("list_tasks", "")])
+    response = _chat(_provider(client))
+    assert response.content[0].input == {}
+
+
+def test_truncated_tool_arguments_raise_provider_error():
+    """MAX_TOKENS 截断：JSONDecodeError 不得穿出 provider 层，且不该重试。
+
+    截断是确定性的 —— 同样的 max_tokens 重发只会得到同样的半截 JSON。
+    """
+    client = FakeClient([
+        _tool_completion("write_file", '{"path": "a.py", "content": "def f(', finish_reason="length")
+    ])
+    provider = _provider(client)
+
+    with pytest.raises(ProviderError) as excinfo:
+        _chat(provider)
+
+    error = excinfo.value
+    assert client.calls == 1, "截断不该重试"
+    assert error.retryable is False
+    assert error.code == "invalid_tool_arguments"
+    assert "截断" in error.message
+    assert "MAX_TOKENS" in error.hint
+
+
+def test_malformed_arguments_are_retried_then_succeed():
+    """没有截断标记的坏 JSON 通常是随机翻车，重试可能成功。"""
+    client = FakeClient([
+        _tool_completion("write_file", '{"path": "a.py"'),
+        _tool_completion("write_file", '{"path": "a.py"}'),
+    ])
+    response = _chat(_provider(client))
+
+    assert client.calls == 2
+    assert response.content[0].input == {"path": "a.py"}
+
+
+def test_malformed_arguments_exhaust_retries_with_attempt_count():
+    """一直坏下去就带着尝试次数报错，而不是无限重试。"""
+    bad = _tool_completion("write_file", "{oops")
+    client = FakeClient([bad, bad, bad])
+
+    with pytest.raises(ProviderError) as excinfo:
+        _chat(_provider(client, max_retries=2))
+
+    assert client.calls == 3
+    assert excinfo.value.attempts == 3
+    assert excinfo.value.retryable is True
+
+
+def test_non_object_arguments_are_rejected():
+    """合法 JSON 但不是对象（例如字符串）同样不能进 dispatch。"""
+    client = FakeClient([_tool_completion("write_file", '"just a string"')])
+
+    with pytest.raises(ProviderError, match="不是 JSON 对象"):
+        _chat(_provider(client))
+
+
+# ============================================================
+# 流式输出
+# ============================================================
+#
+# 不变量：传不传 on_text，返回的响应对象必须一模一样 —— 流式只是传输细节。
+
+def _chunk(content=None, *, tool_calls=None, finish_reason=None, usage=None):
+    """一个 OpenAI 流式 chunk 的替身（choices 可能为空，如只带 usage 的尾块）。"""
+    choices = []
+    if content is not None or tool_calls is not None or finish_reason is not None:
+        choices.append(
+            SimpleNamespace(
+                delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+                finish_reason=finish_reason,
+            )
+        )
+    return SimpleNamespace(choices=choices, usage=usage)
+
+
+def _tc(index, *, id=None, name=None, arguments=None):
+    """tool_call 的增量片段：id/name 通常只在第一片出现。"""
+    return SimpleNamespace(
+        index=index, id=id, function=SimpleNamespace(name=name, arguments=arguments)
+    )
+
+
+def _failing_stream(pieces, exc):
+    """先产出若干 chunk，再抛异常 —— 模拟「输出到一半连接断了」。"""
+
+    def generate():
+        for piece in pieces:
+            yield piece
+        raise exc
+
+    return generate()
+
+
+def test_streaming_forwards_text_and_returns_the_same_shape():
+    client = FakeClient([[
+        _chunk("你"),
+        _chunk("好"),
+        _chunk(finish_reason="stop"),
+        _chunk(usage=SimpleNamespace(prompt_tokens=7, completion_tokens=2)),
+    ]])
+    seen: list[str] = []
+
+    response = _provider(client).chat(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        system="s",
+        max_tokens=16,
+        on_text=seen.append,
+    )
+
+    assert seen == ["你", "好"]
+    assert response.content[0].type == "text"
+    assert response.content[0].text == "你好"
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (7, 2)
+    assert client.last_kwargs["stream"] is True
+
+
+def test_non_streaming_request_has_no_stream_flag():
+    """不传回调时保持原来的非流式请求，不要偷偷打开 stream。"""
+    client = FakeClient([_completion("ok")])
+    _chat(_provider(client))
+    assert "stream" not in client.last_kwargs
+
+
+def test_streaming_assembles_tool_arguments_across_chunks():
+    """参数按 index 分片到达，拼完才是合法 JSON；文本分片为空时不该打前缀。"""
+    client = FakeClient([[
+        _chunk(tool_calls=[_tc(0, id="call_1", name="write_file", arguments='{"path": ')]),
+        _chunk(tool_calls=[_tc(0, arguments='"a.py", "content": "x"}')]),
+        _chunk(finish_reason="tool_calls"),
+    ]])
+    seen: list[str] = []
+
+    response = _provider(client).chat(
+        messages=[{"role": "user", "content": "写文件"}],
+        tools=[],
+        system="s",
+        max_tokens=16,
+        on_text=seen.append,
+    )
+
+    assert response.content[0].type == "tool_use"
+    assert response.content[0].input == {"path": "a.py", "content": "x"}
+    assert seen == []
+
+
+def test_streaming_detects_truncated_tool_arguments():
+    """流式同样要认出「截断」：JSON 拼不完整且 finish_reason=length。"""
+    client = FakeClient([[
+        _chunk(tool_calls=[_tc(0, id="call_1", name="write_file", arguments='{"path": "a.py"')]),
+        _chunk(finish_reason="length"),
+    ]])
+
+    with pytest.raises(ProviderError, match="截断") as excinfo:
+        _provider(client).chat(
+            messages=[{"role": "user", "content": "写大文件"}],
+            tools=[],
+            system="s",
+            max_tokens=16,
+            on_text=lambda _: None,
+        )
+
+    assert client.calls == 1, "截断不重试"
+    assert excinfo.value.retryable is False
+
+
+def test_stream_failure_after_output_is_not_retried():
+    """已经打出去的字收不回来 —— 中断只能报错，不能重试。"""
+    client = FakeClient([
+        _failing_stream([_chunk("半个")], openai.APIConnectionError(request=_request()))
+    ])
+    seen: list[str] = []
+
+    with pytest.raises(ProviderError) as excinfo:
+        _provider(client).chat(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            system="s",
+            max_tokens=16,
+            on_text=seen.append,
+        )
+
+    assert client.calls == 1
+    assert seen == ["半个"]
+    assert excinfo.value.retryable is False
+    assert "流式输出中断" in excinfo.value.message
+
+
+def test_stream_retries_when_nothing_was_printed():
+    """一个字符都没输出时，连接失败仍按可重试处理。"""
+    client = FakeClient([
+        openai.APIConnectionError(request=_request()),
+        [_chunk("ok")],
+    ])
+    seen: list[str] = []
+
+    response = _provider(client).chat(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        system="s",
+        max_tokens=16,
+        on_text=seen.append,
+    )
+
+    assert client.calls == 2
+    assert seen == ["ok"]
+    assert response.content[0].text == "ok"
+
+
+def test_stream_falls_back_when_endpoint_rejects_stream_options(capsys):
+    """部分兼容端点直接 400 拒绝 stream_options：退回普通流，别让整轮失败。"""
+    client = FakeClient([
+        _status_error(openai.BadRequestError, 400),
+        [_chunk("hi")],
+    ])
+    seen: list[str] = []
+
+    response = _provider(client).chat(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        system="s",
+        max_tokens=16,
+        on_text=seen.append,
+    )
+
+    assert client.calls == 2
+    assert seen == ["hi"]
+    assert "stream_options" not in client.last_kwargs
+    assert "usage" in capsys.readouterr().out
+    assert response.usage.output_tokens >= 1, "usage 缺失时应有估算，而不是 0"
+
+
+class FakeMessageStream:
+    """anthropic `messages.stream()` 的替身。"""
+
+    def __init__(self, pieces, final, *, fail_with=None):
+        self.pieces = pieces
+        self.final = final
+        self.fail_with = fail_with
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    @property
+    def text_stream(self):
+        for piece in self.pieces:
+            yield piece
+        if self.fail_with is not None:
+            raise self.fail_with
+
+    def get_final_message(self):
+        return self.final
+
+
+class FakeStreamingAnthropicClient:
+    base_url = "https://example.invalid"
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.calls = 0
+        self.messages = SimpleNamespace(stream=self._stream)
+
+    def _stream(self, **kwargs):
+        self.calls += 1
+        return self.stream
+
+
+def _anthropic_message(text="你好"):
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+    )
+
+
+def test_anthropic_streams_text_and_returns_final_message():
+    final = _anthropic_message()
+    client = FakeStreamingAnthropicClient(FakeMessageStream(["你", "好"], final))
+    seen: list[str] = []
+
+    response = _provider(client, AnthropicProvider).chat(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        system="s",
+        max_tokens=16,
+        on_text=seen.append,
+    )
+
+    assert seen == ["你", "好"]
+    assert response is final
+
+
+def test_anthropic_stream_failure_after_output_is_not_retried():
+    stream = FakeMessageStream(
+        ["半"], None, fail_with=anthropic.APIConnectionError(request=_request())
+    )
+    client = FakeStreamingAnthropicClient(stream)
+
+    with pytest.raises(ProviderError) as excinfo:
+        _provider(client, AnthropicProvider).chat(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            system="s",
+            max_tokens=16,
+            on_text=lambda _: None,
+        )
+
+    assert client.calls == 1
+    assert excinfo.value.retryable is False
+    assert "流式输出中断" in excinfo.value.message
+
+
+def test_agent_loop_streams_text_to_the_callback(monkeypatch):
+    """端到端：loop 把 on_text 透传给 provider，历史里仍是完整消息。"""
+    client = FakeClient([[_chunk("你"), _chunk("好")]])
+    monkeypatch.setattr(loop, "provider", _provider(client, max_retries=0))
+
+    seen: list[str] = []
+    messages = [{"role": "user", "content": "hi"}]
+    loop.agent_loop(messages, on_text=seen.append)
+
+    assert seen == ["你", "好"]
+    assert messages[-1]["content"][0]["text"] == "你好"
+
+
+# ============================================================
 # 403：真实故障场景
 # ============================================================
 
@@ -380,6 +748,30 @@ def test_agent_loop_survives_provider_error(monkeypatch, capsys):
     assert "模型调用失败" in out
     assert "Access to model denied" in out
     assert "账号无权调用该模型" in out
+
+
+def test_agent_loop_survives_truncated_tool_arguments(monkeypatch, capsys):
+    """报告里的原场景：MAX_TOKENS 截断 → ProviderError → 本轮优雅结束。
+
+    修复前 JSONDecodeError 会穿出 provider，再穿出 agent_loop，CLI 带着
+    traceback 崩掉，尚未保存的会话一起丢失。
+    """
+    client = FakeClient([
+        _tool_completion(
+            "write_file",
+            '{"path": "a.py", "content": "def f(\\n    return 1\\n',
+            finish_reason="length",
+        )
+    ])
+    monkeypatch.setattr(loop, "provider", _provider(client, max_retries=0))
+
+    messages = [{"role": "user", "content": "写一个大文件"}]
+    loop.agent_loop(messages)  # 不抛异常
+
+    assert len(messages) == 1, "失败的轮次不得留下半截 assistant 消息"
+    out = capsys.readouterr().out
+    assert "截断" in out
+    assert "MAX_TOKENS" in out
 
 
 def test_agent_loop_reports_retry_count(monkeypatch, capsys):

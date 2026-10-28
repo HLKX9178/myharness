@@ -14,7 +14,7 @@ from myharness.providers import PROVIDER_REGISTRY
 from myharness.security import init_policy
 from myharness.audit import init_audit_logger
 from myharness.bootstrap import install_default_hooks
-from myharness.memory import RECALL_LIMIT, MemoryStore
+from myharness.memory import MemoryStore
 from myharness.skills import BUILTIN_SKILL_DIR, SkillLibrary
 
 # 仓库根目录：<repo>/myharness/config.py -> <repo>/myharness -> <repo>
@@ -106,6 +106,10 @@ AUDIT_LOG = REPO_ROOT / ".myharness" / "audit.jsonl"
 # 长期记忆目录（跨会话共享）
 MEMORY_DIR = REPO_ROOT / ".myharness" / "memory"
 
+# 定时任务：状态文件（任务登记表）与每次运行的会话留档目录
+SCHEDULE_STATE = REPO_ROOT / ".myharness" / "schedules.json"
+SCHEDULE_DIR = REPO_ROOT / ".myharness" / "scheduled"
+
 # 初始化安全策略和审计日志
 init_policy(WORKDIR)
 init_audit_logger(AUDIT_LOG)
@@ -158,14 +162,45 @@ MODEL = _require_env(
 
 # 单次模型回复的 token 上限（Anthropic API 的 max_tokens 参数）。
 #
-# 注意与 loop.py 的 MAX_TOTAL_TOKENS 区分：那是本轮对话的**累计**预算，
-# 这里限制的是**单次请求**的输出长度。
+# 注意区分四个不同的上限，它们管的方向各不相同：
+#   MAX_TOKENS         单次回复的**输出**长度（本项）
+#   MAX_CONTEXT_TOKENS 单次请求的**输入**规模（超了压缩历史）
+#   TURN_TOKEN_BUDGET  一轮对话的**累计**消耗（超了结束本轮）
+#   MAX_TURNS          一轮对话的**请求次数**（超了结束本轮，兜底）
 #
 # 设得太小会在模型写大文件时截断工具参数，表现为
 # "missing required positional arguments" 这类难懂的错误。
 # 各 provider 上限不同，所以做成可配置项而不是写死在 loop 里。
 DEFAULT_MAX_TOKENS = 8000
 MAX_TOKENS = _env_int("MAX_TOKENS", DEFAULT_MAX_TOKENS)
+
+# 单次请求的**输入**上限：历史估算超过它的 80% 就压缩。
+#
+# 这才是「上下文窗口」这一侧的护栏。它与 MAX_TOKENS 是两个方向：
+# MAX_TOKENS 管模型这次能写多长，这里管我们这次发过去多长。
+# 默认 100k 是给 128k 窗口的模型留出回答空间；用 32k 窗口的模型请调小，
+# 否则请求会先被上游以「context length exceeded」拒绝（provider 会报出来，
+# 但那是失败而不是压缩）。
+MAX_CONTEXT_TOKENS = _env_int("MAX_CONTEXT_TOKENS", 100_000)
+
+# 一轮用户消息的**累计**消耗上限（成本护栏）。
+#
+# 注意：每轮请求都会把整段历史重新发一遍，所以这个值按「每次请求的
+# 输入 + 输出」累加，增长远快于上下文本身。它只用来兜住失控的循环
+# （例如模型反复调工具），不是日常限制：正常的十几轮工具调用约几十万。
+# 轮次本身的兜底见下面的 MAX_TURNS。
+TURN_TOKEN_BUDGET = _env_int("TURN_TOKEN_BUDGET", 1_000_000)
+
+# 单次 agent_loop 的模型请求轮数上限。
+#
+# 语义是「**一次用户提问**内的最大模型请求次数」，不是整个会话的总轮数 ——
+# 用户再问一句就重新计数。所以它可以设得很大。
+#
+# 它只是第四层兜底。前三层刹车都在 guards.py，按「无进展」「连续失败」
+# 和 token 预算精确终止；把轮次调大之所以安全，正是因为那三层先拦住了
+# 原地打转。反过来，**只调大轮次而不加刹车就是把死循环的暴露时间往后推** ——
+# 这也是这项改动必须和 ProgressGuard 一起上的原因。
+MAX_TURNS = _env_int("MAX_TURNS", 200)
 
 # 从注册表获取 Provider 类并实例化
 ProviderClass = PROVIDER_REGISTRY.get(PROVIDER_TYPE)
@@ -218,28 +253,24 @@ install_default_hooks(memory_store, provider)
 # 技能目录启动时扫描一次，之后只读；system prompt 只含目录，不含技能全文
 skill_library = SkillLibrary([BUILTIN_SKILL_DIR])
 
-# Phase 5：system prompt 改为动态函数，根据用户查询注入记忆
-def build_system_prompt(user_query: str = "") -> str:
-    """构建 system prompt，可选注入相关记忆。"""
-    base = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks."
+# system prompt 必须**逐字节稳定**。
+#
+# 它在请求前缀里位于 messages 之前（[tools][system][messages...]），所以只要
+# 有一位变化，后面的整段对话历史都会失去前缀缓存 —— 对话越长，代价越大。
+# 因此这里不放任何随用户输入变化的内容，包括长期记忆召回：记忆改由
+# UserPromptSubmit hook 注入到**当前用户消息**里（见 bootstrap.install_default_hooks），
+# 那段本来每轮就是新的，不会作废已有前缀。
+def build_system_prompt(workspace: Path | None = None) -> str:
+    """构建 system prompt。**不接收用户输入**，保证跨请求逐字节相同。
 
-    parts = [base, skill_library.catalog()]
+    Args:
+        workspace: 本次会话的工作目录；None 时回退到全局 WORKDIR
 
-    # 召回相关记忆
-    if user_query:
-        memories = memory_store.search(user_query, limit=RECALL_LIMIT)
-        if memories:
-            mem_lines = [
-                "## Long-term Memory",
-                "The following facts were saved in previous sessions. "
-                "They are for reference only — if they conflict with the current request, "
-                "follow the current request.",
-            ]
-            for mem in memories:
-                mem_lines.append(f"- [{mem['type']}] {mem['description']}")
-            parts.append("\n".join(mem_lines))
-
-    return "\n\n".join(filter(None, parts))
-
-# 向后兼容：默认 system prompt 不含记忆
-SYSTEM = build_system_prompt()
+    为什么必须接受显式 workspace：``agent_loop`` 的 workspace 可以不是全局
+    WORKDIR —— TeamAgent 传给每个 worker 的是 ``.team/<agent>/workspace``。
+    只读全局值会让模型以为自己在仓库根，用相对路径去操作越界文件，然后被
+    safe_path 一条条拒绝，表现为反复重试同一批失败调用。
+    """
+    target = Path(workspace) if workspace is not None else WORKDIR
+    base = f"You are a coding agent at {target}. Use tools to solve tasks.Your current operating environment is Windows 11 + PowerShell"
+    return "\n\n".join(filter(None, [base, skill_library.catalog()]))

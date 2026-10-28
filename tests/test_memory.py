@@ -245,57 +245,50 @@ def test_chinese_query_matches_chinese_memory(store):
 
 
 def test_recall_hook_injects_into_user_message(store):
-    """Phase 5 已移除：记忆现在通过 system prompt 加载，不再注入 user message。"""
-    # 该测试不再适用，但保留以记录行为变更
-    pass
-
-
-def test_install_registers_recall_once(store):
-    """Phase 5 已移除：recall_hook 不再注册到 UserPromptSubmit。"""
-    install_default_hooks(store)
-    # UserPromptSubmit 应该为空
-    assert len(hooks.registered_hooks("UserPromptSubmit")) == 0
-
-
-# ============================================================
-# Phase 5：注入优化（记忆进 system prompt）
-# ============================================================
-
-def test_build_system_prompt_includes_memories(tmp_path):
-    """Phase 5：根据查询动态构建 system prompt，包含相关记忆。"""
-    from myharness.config import build_system_prompt
-    from myharness.memory import MemoryStore
-
-    store = MemoryStore(tmp_path / "memory")
+    """记忆注入用户消息，而不是 system prompt —— system 必须逐字节稳定。"""
     store._memories.append({
-        "name": "tabs",
-        "description": "user prefers tabs",
+        "name": "indent",
+        "description": "user prefers tabs for indentation",
         "type": "user",
         "body": "user prefers tabs for indentation",
         "_path": "",
     })
 
-    # 用临时 store 替换全局 memory_store
-    import myharness.config as config_module
-    original_store = config_module.memory_store
-    config_module.memory_store = store
+    install_default_hooks(store)
+    submitted = hooks.submit_user_prompt("tabs or spaces for indentation?")
 
-    try:
-        prompt = build_system_prompt("what indentation style")
-        assert "Long-term Memory" in prompt
-        assert "tabs" in prompt
-        assert "for reference only" in prompt
-        assert "if they conflict with the current request" in prompt
-    finally:
-        config_module.memory_store = original_store
+    assert isinstance(submitted, str)
+    assert submitted.startswith("<context>")
+    assert "user prefers tabs for indentation" in submitted
+    assert submitted.endswith("tabs or spaces for indentation?")
 
 
-def test_build_system_prompt_without_query_omits_memories(tmp_path):
-    """没有查询时，不注入记忆。"""
+def test_install_registers_recall_once(store):
+    """重复装配不能重复注入：同一个 recall_hook 只注册一次。"""
+    install_default_hooks(store)
+    install_default_hooks(store)
+
+    assert hooks.registered_hooks("UserPromptSubmit") == [store.recall_hook]
+
+
+# ============================================================
+# 前缀稳定性：system prompt 不得随提问变化
+# ============================================================
+
+def test_build_system_prompt_is_static():
+    """system 位于请求前缀中间，任何动态内容都会让整段历史失去缓存。
+
+    记忆进 system 时，`build_system_prompt(query)` 的返回值随提问变化；
+    现在它不接收用户输入，这条约束由函数签名本身保证。
+    """
     from myharness.config import build_system_prompt
 
-    prompt = build_system_prompt("")
-    assert "Long-term Memory" not in prompt
+    first = build_system_prompt()
+    second = build_system_prompt()
+
+    assert first == second, "system prompt 在两次构建之间变了"
+    assert "Long-term Memory" not in first
+    assert "user_query" not in inspect.signature(build_system_prompt).parameters
 
 
 # ============================================================
@@ -400,7 +393,7 @@ def test_extract_memories_hook_handles_json_parse_error(store, mock_provider):
 def test_extraction_failure_is_reported_not_silent(store, capsys):
     """提取失败不能中断主循环，但必须打印原因。"""
     class BrokenProvider:
-        def chat(self, messages, tools, system, max_tokens):
+        def chat(self, messages, tools, system, max_tokens, on_text=None):
             raise RuntimeError("upstream 500")
 
     messages = [

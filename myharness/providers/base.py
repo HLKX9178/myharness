@@ -209,6 +209,36 @@ def parse_retry_after(exc: BaseException) -> float | None:
     return seconds if seconds > 0 else None
 
 
+def cached_prompt_tokens(usage: Any) -> int:
+    """从 usage 里取「命中前缀缓存的输入 token 数」；取不到返回 0。
+
+    三家叫法不同，必须兼容：
+
+        Anthropic           usage.cache_read_input_tokens
+        OpenAI 兼容         usage.prompt_tokens_details.cached_tokens
+        DeepSeek / 部分网关 usage.prompt_cache_hit_tokens
+
+    **返回 0 不等于没命中**，也可能是端点压根不上报。所以调用方只能把它
+    当作「命中了多少」的上界证据，不能反推「一定没命中」——判据见 loop 里
+    的打印说明。
+    """
+    for attribute in ("cache_read_input_tokens", "prompt_cache_hit_tokens", "cached_tokens"):
+        value = getattr(usage, attribute, None)
+        if isinstance(value, int):
+            return value
+
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is not None:
+        value = getattr(details, "cached_tokens", None)
+        if isinstance(value, int):
+            return value
+        if isinstance(details, dict):
+            value = details.get("cached_tokens")
+            if isinstance(value, int):
+                return value
+    return 0
+
+
 class BaseProvider(ABC):
     """所有模型提供商的抽象基类。"""
 
@@ -238,6 +268,7 @@ class BaseProvider(ABC):
         tools: list[dict[str, Any]],
         system: str,
         max_tokens: int,
+        on_text: Callable[[str], None] | None = None,
     ) -> Any:
         """
         发起一次对话请求。
@@ -247,12 +278,20 @@ class BaseProvider(ABC):
             tools: 工具列表（OpenAI 格式）
             system: 系统提示词
             max_tokens: 最大生成 token 数
+            on_text: 文本分片回调。None 表示不要流式；传入时实现应边收边调，
+                但**返回值必须与不传时完全一致**（同一条消息、同一份 usage）——
+                流式是传输细节，不能改变 Loop 看到的东西。
 
         Returns:
             标准化的响应对象（包含 content, usage 等字段）
 
         Raises:
             ProviderError: 调用失败。SDK 异常不得穿出本方法。
+
+        **流式与重试的约定**：一旦通过 `on_text` 输出过内容，就不能再重试
+        （重试会把同样的文字打印第二遍）。实现必须在首片之前允许重试，
+        之后把任何失败转成 `retryable=False` 的 ProviderError。半截回复
+        不得作为 assistant 消息进入历史 —— 抛异常即可，Loop 只在成功时落库。
         """
         pass
 

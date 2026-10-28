@@ -14,11 +14,15 @@
 
 import json
 import threading
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from myharness.teams.filelock import FileLock
 
 
 class TaskStatus(Enum):
@@ -49,27 +53,66 @@ class TaskBoard:
     共享任务队列（多 Agent 协作）。
 
     持久化格式：JSON Lines，每行一个任务的最新状态。
-    原子性保证：通过文件锁 + append-only 写入。
+
+    并发模型：
+    - **进程内**用 ``threading.Lock`` 互斥（同进程多线程共享一个实例）。
+    - **跨进程**用 ``FileLock``（``.locks/<hash>.lock``）互斥。worker 是
+      ``spawn`` 出来的独立进程，各自构造自己的 TaskBoard，进程内的锁对它们
+      毫无约束 —— 早期版本只有进程内锁，两个 worker 会同时读到同一个 PENDING
+      任务、各自写入 CLAIMED，于是同一任务被执行两次、工作区被写两遍。
+    - 所有「读 → 改 → 写」都必须在同一个 ``_guard()`` 里完成，否则仍是
+      TOCTOU 竞态。
     """
 
-    def __init__(self, board_file: Path, timeout_seconds: int = 300):
+    def __init__(
+        self,
+        board_file: Path,
+        timeout_seconds: int = 300,
+        lock_timeout: float = 10.0,
+    ):
         """
         初始化任务板。
 
         Args:
             board_file: 任务板文件路径（JSON Lines）
             timeout_seconds: 任务超时时间（秒）。超时后任务可被重新认领。
+            lock_timeout: 跨进程锁的最长等待时间（秒）
         """
-        self.board_file = board_file
+        self.board_file = Path(board_file)
         self.timeout_seconds = timeout_seconds
         self._lock = threading.Lock()
+        self._lock_timeout = lock_timeout
         self._ensure_file()
 
+    @contextmanager
+    def _guard(self) -> Iterator[None]:
+        """进程内 + 跨进程双重互斥。
+
+        两层锁缺一不可，所以顺序固定为「先进程内、后跨进程」：
+
+        - 只有进程内锁 → 独立进程之间完全不互斥（本 bug 的成因）。
+        - 只有文件锁 → 同进程的多个线程会在文件锁上互相等待，本该并行的
+          读操作被串行化；而且 flock 的互斥粒度是 open file description，
+          对 fork 出来的子进程不成立，靠不住。
+        """
+        with self._lock:
+            with FileLock(
+                self.board_file.parent,
+                self.board_file.name,
+                timeout=self._lock_timeout,
+            ):
+                yield
+
     def _ensure_file(self) -> None:
-        """确保文件存在。"""
+        """确保文件存在。
+
+        用 ``touch(exist_ok=True)`` 而不是 ``write_text("")``：后者是截断写，
+        两个 worker 同时启动、都判断到文件不存在时，后到的那个会把对方
+        刚建好的任务板清空。
+        """
         self.board_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.board_file.exists():
-            self.board_file.write_text("", encoding="utf-8")
+            self.board_file.touch(exist_ok=True)
 
     def create_task(self, title: str, description: str) -> str:
         """
@@ -82,7 +125,6 @@ class TaskBoard:
         Returns:
             task_id: 任务 ID
         """
-        import uuid
         task_id = f"task_{uuid.uuid4().hex[:12]}"
 
         task = Task(
@@ -93,7 +135,8 @@ class TaskBoard:
             created_at=datetime.now().isoformat(),
         )
 
-        self._append_task(task)
+        with self._guard():
+            self._append_task(task)
         return task_id
 
     def claim_task(self, agent_id: str) -> Task | None:
@@ -111,7 +154,9 @@ class TaskBoard:
         Returns:
             认领成功的任务，或 None
         """
-        with self._lock:
+        # 读、选、写必须在同一把锁内：拆开做就是 TOCTOU ——
+        # 两个 worker 都读到 PENDING、都认为该由自己执行。
+        with self._guard():
             tasks = self._load_all_tasks()
 
             # 1. 优先认领 PENDING 任务
@@ -154,7 +199,7 @@ class TaskBoard:
         Returns:
             是否成功完成
         """
-        with self._lock:
+        with self._guard():
             tasks = self._load_all_tasks()
             task = tasks.get(task_id)
 
@@ -189,7 +234,7 @@ class TaskBoard:
         Returns:
             是否成功标记
         """
-        with self._lock:
+        with self._guard():
             tasks = self._load_all_tasks()
             task = tasks.get(task_id)
 
@@ -216,7 +261,7 @@ class TaskBoard:
         Returns:
             Task 或 None
         """
-        with self._lock:
+        with self._guard():
             tasks = self._load_all_tasks()
             return tasks.get(task_id)
 
@@ -230,7 +275,7 @@ class TaskBoard:
         Returns:
             任务列表（按创建时间倒序）
         """
-        with self._lock:
+        with self._guard():
             tasks = self._load_all_tasks()
             result = list(tasks.values())
 
@@ -261,12 +306,19 @@ class TaskBoard:
                     line = line.strip()
                     if not line:
                         continue
-                    data = json.loads(line)
-                    # 恢复 Enum
-                    data["status"] = TaskStatus(data["status"])
-                    task = Task(**data)
+                    # 逐行容错：一行坏了（历史遗留的半行、手工编辑出错）
+                    # 不该把整个任务板判死刑 —— 早期实现把 try 套在整个
+                    # 循环外面，一个坏行会让之后所有任务凭空消失。
+                    try:
+                        data = json.loads(line)
+                        # 恢复 Enum
+                        data["status"] = TaskStatus(data["status"])
+                        task = Task(**data)
+                    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                        print(f"[taskboard] Skipping malformed line: {exc}")
+                        continue
                     tasks[task.task_id] = task
-        except Exception as exc:
+        except OSError as exc:
             print(f"[taskboard] Failed to load tasks: {exc}")
 
         return tasks
@@ -274,6 +326,9 @@ class TaskBoard:
     def _append_task(self, task: Task) -> None:
         """
         追加任务状态到文件（append-only）。
+
+        调用方必须持有 ``self._guard()``：这里只保证「一行写完」，
+        不负责与其他进程的写入排序。
 
         Args:
             task: 任务对象

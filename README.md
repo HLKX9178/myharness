@@ -36,7 +36,7 @@ Harness，胜过一个功能很多但无法信任的 Harness。
 | M2 | 状态与安全：会话持久化、上下文压缩、权限与审计 | ✅ |
 | M3 | 扩展机制：技能加载、跨会话长期记忆 | ✅ |
 | M4 | 外部连接：MCP（stdio + Streamable HTTP） | ✅ |
-| M5 | 并发与调度：后台任务、定时器、状态恢复 | ✅ |
+| M5 | 并发与调度：后台任务、cron 定时、重启恢复 | ✅ |
 | M6 | 多 Agent 协作：共享任务板、进程隔离、崩溃接管 | ✅ |
 | M7 | 治理：可复现的评测报告 | ✅ |
 | M8 | 交付：文档、架构图与 ADR | ✅ |
@@ -136,10 +136,51 @@ Windows 下也可双击 `run.bat`，或在 VS Code 中按 `F5` 启动（带断�
 
 ```
 YOU >> 创建一个 Python 文件计算斐波那契数列
-BOT >> ...
+BOT >> 我先看一下目录结构。
+  [tool] glob_files(['*.py'])
+  [result] ...
+BOT >> 目录里只有入口文件，我新建一个 fibonacci.py。
 ```
 
+回复是**流式**的：模型一开始生成就逐段打印，每条 assistant 消息各自带
+`BOT >>` 前缀；工具调用与结果仍由 hook 实时显示。想关掉流式（比如排查显示
+问题、或重定向到日志），加 `--no-stream`，行为回到「整轮结束后一次打印」。
+
+### 4. 找回以前的对话
+
+每次对话都落盘在 `.myharness/sessions/<id>.json`；定时任务的留档在
+`.myharness/scheduled/<task_id>/`。两者用同一套命令找回：
+
+```bash
+python -m myharness --list-sessions              # 列出可恢复的会话
+python -m myharness --resume last                # 最近一条有内容的
+python -m myharness --resume session_20261027_183336
+```
+
+列表带**首条消息预览 + 条数**（只有 ID 和时间戳等于没给），空会话不列出。
+恢复后历史原样在前，可以接着问 —— 会话文件是「每轮结束就写」的，所以进程
+崩溃最多丢掉当前这一轮，不会丢整段对话。
+
 ---
+
+### 5. 在仓库之外的目录里工作
+
+默认工作目录是仓库根，它同时也是权限边界。要让 Agent 去别的目录干活，
+用 `--workspace` 把整条边界挪过去（是「搬家」，不是「开门」）：
+
+```bash
+python -m myharness --workspace "C:\Users\me\Desktop\某个项目"
+```
+
+效果等同于启动前设置 `WORKDIR` 环境变量，但有两个区别：
+
+- `--workspace` 只影响这一次运行，不改机器上的持久配置；
+- `.env` 里的 `WORKDIR` 会盖掉命令行环境变量（`load_dotenv(override=True)`），
+  `--workspace` 不受它影响。
+
+越界写入仍然会被拒绝。拒绝属于**策略结果**而不是失败：同一个路径重试永远不会
+成功，所以它既不计入「连续失败中止」，也不计入「无进展中止」，只会得到一条提示，
+让模型改路径或提示你用 `--workspace` 重开。
 
 ## 配置项
 
@@ -153,16 +194,34 @@ BOT >> ...
 | `ANTHROPIC_BASE_URL` | 否 | 官方端点 | 走第三方 Anthropic 兼容端点时设置 |
 | `OPENAI_API_KEY` | 视 provider | — | 使用 `openai` provider 时必填 |
 | `OPENAI_BASE_URL` | 否 | 官方端点 | 走千问等 OpenAI 兼容端点时设置 |
-| `MAX_TOKENS` | 否 | `8000` | 单次模型回复的 token 上限 |
+| `MAX_TOKENS` | 否 | `8000` | 单次模型回复的**输出**上限 |
+| `MAX_CONTEXT_TOKENS` | 否 | `100000` | 单次请求的**输入**上限，超了压缩历史 |
+| `TURN_TOKEN_BUDGET` | 否 | `1000000` | 一轮对话的**累计**消耗上限，超了结束本轮 |
+| `MAX_TURNS` | 否 | `200` | 一轮对话的**请求次数**上限（兜底，见下） |
 | `REQUEST_TIMEOUT_SECONDS` | 否 | `120` | 单次模型请求超时（连接超时固定 10s） |
 | `WORKDIR` | 否 | 仓库根目录 | Agent 的工作目录，**同时是权限边界** |
 
 `.env.example` 中每个可选项都写了「为什么需要它」以及典型误配的症状，
 建议连同注释一起读。几个容易踩的点：
 
-- **`MAX_TOKENS` 设太小**，模型写大文件时工具参数会被截断，报错形如
-  `write_file() missing 2 required positional arguments` —— 看起来像模型不会用工具，
-  实际是输出被截断。
+- **`MAX_TOKENS` 设太小**，模型写大文件时工具参数会被截断，两种表现：
+  参数仍是合法 JSON 但缺字段，报 `write_file() missing 2 required positional arguments`；
+  或者参数被切成半截、根本不是合法 JSON，报「工具调用参数被截断（…）触到了 max_tokens」。
+  前者像模型不会用工具，后者像模型输出坏了，实际都是输出被截断 —— 调大 `MAX_TOKENS`，
+  或让模型把大文件拆成多次写。
+- **三个 token 上限管的是不同的事**，别按同一个直觉调：`MAX_TOKENS` 是模型一次能写多长；
+  `MAX_CONTEXT_TOKENS` 是我们一次发过去多长（超了自动丢最早的整轮对话，单条超大
+  tool_result 会被截断）；`TURN_TOKEN_BUDGET` 是一轮对话累计花了多少 —— 每轮都会
+  把历史重发一遍，所以它涨得比上下文快得多。终端里 `[tokens] ... (total: N)` 是累计值，
+  **不是**当前上下文大小。
+- **一轮对话什么时候会停**：四层，从精确到兜底 ——
+  ① 模型不再调用工具，正常完成；
+  ② 同一工具用相同参数连续 3 次拿到完全相同的结果 → 先把「无进展」提示喂回模型，
+  连续 5 次 → 终止（`no_progress`）。参数相同但结果在变（例如轮询后台任务）不算；
+  ③ 连续 3 次工具调用报错 → 终止（`tool_failures`）；
+  ④ `TURN_TOKEN_BUDGET` 与 `MAX_TURNS` 兜底。`MAX_TURNS` 是四层里最粗的一层，
+  所以设得很大（200）—— 原地打转由 ② 拦住，不必靠轮次。除正常完成外的出口都会
+  明确打印「本轮未完成」，不会被当成做完。
 - **不设 `REQUEST_TIMEOUT_SECONDS` 的代价**：两个 SDK 默认超时都是 600 秒，
   叠加 providers 层的 3 次尝试，一次卡死的请求能让进程静默占住近半小时。
   多 Agent 场景下表现为该 worker 停止轮询、它认领的任务被永久占住。
@@ -202,6 +261,9 @@ OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 | `list_tasks` | 查看任务状态与认领者 |
 | `get_task_result` | 查询某个任务的执行结果 |
 | `send_team_message` | 向指定 Agent 发消息 |
+| `schedule_task` | 按 cron 登记一条定时提示词任务 |
+| `list_schedules` | 查看定时任务与最近一次运行结果 |
+| `cancel_schedule` | 取消定时任务（按名称或 ID） |
 
 此外，MCP server 发现的工具会在连接后动态并入工具池（命名前缀 `mcp__`）。
 
@@ -220,7 +282,7 @@ execute_tool()          dispatch.py —— 唯一的工具执行入口
    │
    ├─ PreToolUse   ── permission_hook → repeat_call_guard → log_hook
    ├─ handler      ── 工具实现（永远返回字符串）
-   └─ PostToolUse  ── result_hook → failure_guard → large_output_hook
+   └─ PostToolUse  ── result_hook → failure_guard → progress_guard → large_output_hook
 ```
 
 **横切逻辑一律实现为 hook，不写进 Agent Loop。** 四个扩展点：
@@ -229,7 +291,7 @@ execute_tool()          dispatch.py —— 唯一的工具执行入口
 |---|---|---|
 | `UserPromptSubmit` | 用户输入进入 `messages` 之前 | 上下文注入、输入拦截 |
 | `PreToolUse` | 工具执行之前 | 权限校验、重复调用拦截 |
-| `PostToolUse` | 工具执行之后 | 审计、指标、大输出摘要 |
+| `PostToolUse` | 工具执行之后 | 审计、指标、连续失败计数、无进展检测、大输出摘要 |
 | `Stop` | 一轮结束 | 记忆提取、会话小结 |
 
 hook 返回 `None` 表示放行；返回其它值表示拦截，该值短路后续 hook 并成为
@@ -238,6 +300,12 @@ hook 返回 `None` 表示放行；返回其它值表示拦截，该值短路后�
 
 **为什么这是硬约束**：权限判定若依赖「每个工具自己记得调用」，新增工具就会
 **静默绕过**安全检查。hook 位于 dispatch 路径上，使绕过在结构上不可能。
+
+长期记忆也挂在这条链上：`UserPromptSubmit` 把最多 3 条相关记忆包成
+`<context>` 拼进**当前用户消息**，`Stop` 负责自动提取写入。记忆**不进 system
+prompt** —— system 位于请求前缀中，只要随提问变化一个字节，后面的整段历史
+都会失去前缀缓存（`run_prefix_audit.py` 可以离线核对这一点）。注入文本会随
+这条消息留在历史里，也会随旧轮次一起被压缩掉。
 
 模块依赖方向、职责边界与完整架构图见
 [`ARCHITECTURE.md`](ARCHITECTURE.md) 与 [`AGENTS.md`](AGENTS.md#3-架构与模块边界)；
@@ -256,6 +324,9 @@ Provider 层负责三件事：**接口统一、错误归一、重试归属**。
   尊重 `retry-after` 且封顶 8s）。**401 / 403 / 404 属于永久拒绝，一次即止** ——
   重试只会让你白等。
 - SDK 自带重试被显式关闭（`max_retries=0`），避免与本层重试叠加放大。
+- **流式输出的重试边界**：首片文字到达之前，失败照常重试；一旦已经打到屏幕上，
+  就不再重试（否则同样的文字会打两遍），而是报「流式输出中断」并放弃本轮 ——
+  不完整的回复不会进历史。
 
 诊断输出会带上状态码、服务端业务错误码、已尝试次数与可执行的修复建议。
 例如账号未开通模型权限时（单次尝试，不重试）：
@@ -293,14 +364,51 @@ from myharness.tools import spawn_team, create_task, list_tasks
 
 ---
 
+## 定时任务
+
+到点自动跑一轮 agent。任务的内容是**一段提示词**，不是函数指针 —— 提示词随
+状态文件一起落盘，所以进程重启后不需要重新注册任何 handler 就能继续执行。
+
+模型通过 `schedule_task` 登记，也可以直接调库：
+
+```python
+from myharness.runtime import schedule_task
+
+schedule_task(
+    name="morning-report",
+    cron_expr="0 9 * * 1-5",          # 工作日 9:00
+    prompt="总结昨天 git log 里的改动，写进 计划与方案/日报.md",
+)
+```
+
+执行需要一个常驻进程（交互式会话**不会**在后台跑调度 —— 前台后台各跑一轮
+agent 会污染 hook 与 guards 的进程级状态）：
+
+```bash
+python -m myharness --list-jobs     # 看任务、下次触发时间、最近一次结果
+python -m myharness --run-jobs      # 前台常驻，Ctrl-C 优雅停止
+```
+
+- 状态文件：`.myharness/schedules.json`（原子写，写一半被杀不会丢任务）；
+- 常驻进程每轮与状态文件对齐：另一个进程（交互式会话）新登记或取消的任务
+  即时生效，不需要重启调度器；
+- 每次运行的会话留档在 `.myharness/scheduled/<task_id>/`，可用 `--resume` 打开；
+- 到期先推进 `next_run` 再执行，单个任务不会在同一分钟里反复触发；
+- 进程在执行中途被杀，重启后该任务标记为 `interrupted`，不会伪装成成功；
+- 模型调用失败时任务记为 `error` 并保留原因 —— 定时任务最怕的是静默停摆。
+
+---
+
 ## MCP 集成
 
 支持 **stdio** 与 **Streamable HTTP** 两种传输；工具以 `mcp__<server>__<tool>`
 前缀注册，命名冲突会被检测。
 
-授权策略完全由宿主侧配置决定，**不采信 server 自述**。可运行的接入示例见
-[`examples/`](examples/)（`mcp_demo.py`、`mcp_stdio_example.py`、
-`mcp_agent_integration.py`）。
+工具权限统一走 `PreToolUse`（`security.permission_hook`）。MCP 工具目前
+**没有**单独的宿主侧策略层 —— 它们和 `glob_files` 一样落在「无对应策略即
+放行」的分支里。要收紧，应在 `permission_hook` 里按 `mcp__` 前缀加判定。
+可运行的接入示例见 [`examples/`](examples/)（`mcp_demo.py`、
+`mcp_stdio_example.py`、`mcp_agent_integration.py`）。
 
 ---
 
@@ -339,7 +447,7 @@ myharness/                    仓库根：只放工具链、文档与项目元�
 │   ├── skills/               技能目录（*.md 为内置技能）
 │   ├── mcp/                  MCP 客户端与注册表
 │   ├── teams/                多 Agent 协作
-│   ├── runtime/              后台任务与定时器
+│   ├── runtime/              后台任务、cron 调度与执行
 │   └── ui.py                 终端输出样式
 │
 ├── tests/                    测试（必须入库）
@@ -362,7 +470,8 @@ myharness/                    仓库根：只放工具链、文档与项目元�
 - **不声称「生产级」** —— 这是一个个人项目，多 Agent 协作采用文件系统通信，
   适合单机、中等规模的任务，不适合分布式部署。
 - **安全策略是「防误操作」而非「防恶意攻击」** —— 命令检查与路径边界能拦住
-  模型的手滑，但不是一个针对攻破者的沙箱。
+  模型的手滑，但不是一个针对攻破者的沙箱。定时任务同样在无人值守的情况下
+  以完整工具权限执行，只在可信环境里使用。
 
 ---
 

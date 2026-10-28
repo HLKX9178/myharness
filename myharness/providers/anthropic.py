@@ -1,7 +1,7 @@
 """Anthropic Claude Provider 实现。"""
 
 import os
-from typing import Any
+from typing import Any, Callable
 
 from anthropic import (
     APIConnectionError,
@@ -62,9 +62,13 @@ class AnthropicProvider(BaseProvider):
         tools: list[dict[str, Any]],
         system: str,
         max_tokens: int,
+        on_text: Callable[[str], None] | None = None,
     ) -> Any:
         """
         调用 Anthropic Messages API。
+
+        Args:
+            on_text: 文本分片回调；None 表示不流式（返回值完全相同）
 
         Returns:
             Anthropic Response 对象（包含 content, usage 等）
@@ -72,15 +76,61 @@ class AnthropicProvider(BaseProvider):
         Raises:
             ProviderError: 调用失败（SDK 异常不会穿出本方法）
         """
+        if on_text is None:
+            return self._with_retry(
+                lambda: self.client.messages.create(
+                    model=self.model,
+                    system=system,
+                    max_tokens=max_tokens,
+                    messages=messages,
+                    tools=tools,
+                )
+            )
+
         return self._with_retry(
-            lambda: self.client.messages.create(
+            lambda: self._stream(on_text, messages, tools, system, max_tokens)
+        )
+
+    def _stream(
+        self,
+        on_text: Callable[[str], None],
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        system: str,
+        max_tokens: int,
+    ) -> Any:
+        """流式取一次响应。
+
+        SDK 的 `messages.stream()` 负责把 content_block_delta 拼回一条完整
+        Message（含 tool_use 的 input），所以这里只需转发文本 + 取终态 ——
+        与非流式路径返回的是同一个对象类型。
+
+        首片之前失败按原异常抛给 `_with_retry`（可重试）；已经输出过内容再失败
+        就转成不可重试的 ProviderError —— 屏幕上的字收不回来，重试只会重复。
+        """
+        emitted = False
+        try:
+            with self.client.messages.stream(
                 model=self.model,
                 system=system,
                 max_tokens=max_tokens,
                 messages=messages,
                 tools=tools,
-            )
-        )
+            ) as stream:
+                for text in stream.text_stream:
+                    if not text:
+                        continue
+                    emitted = True
+                    on_text(text)
+                return stream.get_final_message()
+        except Exception as exc:
+            if emitted:
+                raise ProviderError(
+                    f"流式输出中断：{type(exc).__name__}: {exc}",
+                    retryable=False,
+                    hint="本轮已放弃（不完整的回复不会进历史），重新提问即可。",
+                ) from exc
+            raise
 
     def get_model_name(self) -> str:
         """返回当前模型名称。"""

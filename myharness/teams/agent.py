@@ -16,11 +16,7 @@
 from pathlib import Path
 from typing import Any
 
-from myharness.config import (
-    MAX_TOKENS,
-    build_system_prompt,
-    provider,
-)
+from myharness.hooks import Block, submit_user_prompt
 from myharness.loop import agent_loop
 from myharness.session import Session
 from myharness.teams.taskboard import TaskBoard, TaskStatus
@@ -96,22 +92,62 @@ class TeamAgent:
             return {"success": False, "message": "No tasks available"}
 
         # 2. 准备上下文
+        #
+        # 走与交互式会话同一条记忆注入路径（UserPromptSubmit）。worker 之前是
+        # 靠 system prompt 里的召回拿到记忆的，那条路因为前缀缓存已经移除；
+        # 注入只发生在**新建的这条消息**上，不会作废任何已有前缀。
+        task_prompt = f"Task: {task.title}\n\n{task.description}"
+        submitted = submit_user_prompt(task_prompt)
+        if isinstance(submitted, Block):
+            # worker 没有交互界面，输入被 hook 拒绝时只能让任务失败，
+            # 不能假装什么都没发生继续执行。
+            reason = f"prompt rejected by hook: {submitted.reason}"
+            self.taskboard.fail_task(task.task_id, self.agent_id, reason)
+            self.session.save()
+            return {"success": False, "task_id": task.task_id, "error": reason}
+
         self.messages.clear()
-        self.messages.append({
-            "role": "user",
-            "content": f"Task: {task.title}\n\n{task.description}"
-        })
+        self.messages.append({"role": "user", "content": submitted})
 
         # 3. 在独立 workspace 执行（通过显式参数传递）
         try:
-            agent_loop(self.messages, workspace=self.workspace)
+            outcome = agent_loop(self.messages, workspace=self.workspace)
 
             # 4. 提取结果（最后一条 assistant 消息）
             result = self._extract_last_reply(self.messages)
 
+            # 4.5 没走完就不是成果：预算耗尽、轮次用尽、无进展、连续失败都
+            # 会留下「说过几句话」的历史，只看有没有消息会把它们当成功。
+            # 交给任务板记失败，理由写清楚，免得下游以为工作已交付。
+            if not outcome.completed:
+                reason = (
+                    f"loop ended without completing ({outcome.reason}): "
+                    f"{outcome.detail or 'no detail'}"
+                )
+                marked = self.taskboard.fail_task(task.task_id, self.agent_id, reason)
+                self.session.save()
+                return {
+                    "success": False,
+                    "task_id": task.task_id,
+                    "error": reason if marked else "claim lost: task was reclaimed",
+                }
+
             # 5. 标记任务完成
-            self.taskboard.complete_task(task.task_id, self.agent_id, result)
+            # 返回 False 说明认领已经失效：执行时间超过 timeout_seconds，
+            # 任务被别的 worker 当作「崩溃遗留」接管了。本次副作用已经
+            # 落在 workspace 里，无法回收，但结果不能再写进任务板 ——
+            # 否则会用迟到的结果覆盖接管者的状态。
+            completed = self.taskboard.complete_task(
+                task.task_id, self.agent_id, result
+            )
             self.session.save()
+
+            if not completed:
+                return {
+                    "success": False,
+                    "task_id": task.task_id,
+                    "error": "claim lost: task was reclaimed by another worker",
+                }
 
             return {
                 "success": True,

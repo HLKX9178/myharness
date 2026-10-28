@@ -107,13 +107,24 @@ class FileLock:
             self._lock_handle = None
 
     def _acquire_windows(self) -> None:
-        """Windows 平台获取锁（msvcrt.locking）。"""
+        """Windows 平台获取锁（msvcrt.locking）。
+
+        用 ``a+b`` 而非 ``w`` 打开：``w`` 每次都会 truncate 锁文件，
+        而其它进程正持有同一文件的区域锁时，截断会让锁定区域凭空消失，
+        持锁方释放时拿到的是 EACCES，只能靠 close 兜底。
+
+        msvcrt.locking 从**文件当前位置**开始锁，因此必须 seek(0)：
+        否则不同进程的文件指针落在不同位置，锁的根本不是同一段字节，
+        互斥会静默失效。
+        """
         import msvcrt
 
-        # 打开锁文件
-        handle = open(self.lock_file, "w", encoding="utf-8")
+        handle = open(self.lock_file, "a+b")
         try:
-            # 尝试独占锁定
+            if self.lock_file.stat().st_size == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             self._lock_handle = handle
         except (OSError, IOError):
@@ -126,6 +137,7 @@ class FileLock:
 
         if self._lock_handle:
             try:
+                self._lock_handle.seek(0)
                 msvcrt.locking(self._lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
             finally:
                 self._lock_handle.close()
@@ -134,8 +146,8 @@ class FileLock:
         """Unix 平台获取锁（fcntl.flock）。"""
         import fcntl
 
-        # 打开锁文件
-        handle = open(self.lock_file, "w", encoding="utf-8")
+        # a+b 而非 w：flock 与文件内容无关，但没有理由每次截断别人的锁文件
+        handle = open(self.lock_file, "a+b")
         try:
             # 尝试独占锁定（非阻塞）
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -153,7 +153,7 @@ def test_agent_loop_passes_configured_max_tokens(monkeypatch):
     captured = {}
 
     class FakeProvider:
-        def chat(self, messages, tools, system, max_tokens):
+        def chat(self, messages, tools, system, max_tokens, on_text=None):
             captured["max_tokens"] = max_tokens
             # 返回空 content：没有 tool_use，循环会走到 Stop 后退出
             return SimpleNamespace(

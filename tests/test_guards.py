@@ -5,6 +5,8 @@
   RepeatCallGuard          重复调用拦截
   ConsecutiveFailureGuard  连续失败统计与中止判定
 
+（第三个守卫 ProgressGuard 的用例在 test_progress_guard.py。）
+
 并锁住一个协议约束：被拦截的调用必须返回 tool_result 文本，
 而不是「跳过执行 + 追加纯文本 user 消息」—— 后者会破坏
 tool_use / tool_result 的配对（契约 2）。
@@ -20,6 +22,7 @@ from myharness.guards import (
     ConsecutiveFailureGuard,
     RepeatCallGuard,
     failure_guard,
+    progress_guard,
     repeat_call_guard,
     reset_turn_state,
 )
@@ -196,6 +199,7 @@ def test_default_guards_are_registered():
 
     assert repeat_call_guard in hooks.registered_hooks("PreToolUse")
     assert failure_guard in hooks.registered_hooks("PostToolUse")
+    assert progress_guard in hooks.registered_hooks("PostToolUse")
 
 
 def test_permission_runs_before_repeat_guard():
@@ -217,14 +221,17 @@ def test_install_is_idempotent():
     assert pre.count(repeat_call_guard) == 1, "重复装配不得产生重复 hook"
 
 
-def test_reset_turn_state_clears_both_guards():
+def test_reset_turn_state_clears_all_guards():
     repeat_call_guard(make_block("read_file", path="a.txt"))
     failure_guard(make_block("bash"), "Error: x")
+    progress_guard(make_block("read_file", path="a.txt"), "固定内容")
 
     reset_turn_state()
 
     assert repeat_call_guard(make_block("read_file", path="a.txt")) is None
     assert failure_guard.failures == 0
+    assert progress_guard.take_feedback() is None
+    assert not progress_guard.should_abort
 
 
 def test_post_tool_use_hooks_all_receive_events():

@@ -125,7 +125,7 @@ class TestMCPRegistry:
         )
         registry.add_client(client)
 
-        tools, handlers, policies = registry.assemble_tool_pool([], {})
+        tools, handlers = registry.assemble_tool_pool([], {})
 
         assert len(tools) == 1
         assert tools[0]["name"] == "mcp__docs__search"
@@ -189,30 +189,6 @@ class TestMCPRegistry:
 
         with pytest.raises(ValueError, match="type must be 'object'"):
             registry.assemble_tool_pool([], {})
-
-    def test_policy_override(self):
-        """宿主侧策略覆盖 server 的 readOnlyHint（M4 验收标准 4）。"""
-        registry = MCPRegistry()
-        client = MCPClient("deploy")
-        client.register(
-            tool_defs=[
-                {
-                    "name": "trigger",
-                    "inputSchema": {"type": "object"},
-                    "annotations": {"readOnlyHint": True},  # server 声称只读
-                }
-            ],
-            handlers={"trigger": lambda: "deployed"},
-        )
-        registry.add_client(client)
-
-        # 宿主侧设置为 deny
-        registry.set_policy("deploy", "trigger", "deny")
-
-        tools, handlers, policies = registry.assemble_tool_pool([], {})
-
-        # 策略由宿主侧决定，不信任 server
-        assert policies["mcp__deploy__trigger"] == "deny"
 
 
 class TestMockServers:

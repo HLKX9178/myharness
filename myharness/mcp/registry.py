@@ -13,14 +13,17 @@ class MCPRegistry:
     1. 管理已连接的 server
     2. 组装动态工具池（内置工具 + MCP 工具）
     3. 检测命名冲突
-    4. 应用宿主侧授权策略
+
+    权限说明：MCP 工具的宿主侧授权**不在这里**。早期版本为每个 MCP 工具
+    算过 allow / confirm / deny，但 assemble_tool_pool 的返回值没有任何
+    调用方读取它，dispatch 也从不检查 —— 那套策略实际全是默认放行，只起到
+    「看起来有权限控制」的误导作用，已整体移除。真正的工具权限判定在
+    security.permission_hook（PreToolUse），新增策略应当加在那里。
     """
 
     def __init__(self):
         """初始化注册表。"""
         self.clients: dict[str, MCPClient] = {}
-        self.host_policy: dict[tuple[str, str], str] = {}
-        self.tool_policies: dict[str, str] = {}
 
     def add_client(self, client: MCPClient) -> None:
         """
@@ -121,22 +124,9 @@ class MCPRegistry:
         # 添加到 registry
         self.add_client(client)
 
-    def set_policy(self, server: str, tool: str, policy: str) -> None:
-        """
-        设置宿主侧授权策略。
-
-        Args:
-            server: Server 名称
-            tool: 工具名称（原始名称）
-            policy: "allow" | "confirm" | "deny"
-        """
-        if policy not in {"allow", "confirm", "deny"}:
-            raise ValueError(f"Invalid policy: {policy!r}")
-        self.host_policy[(server, tool)] = policy
-
     def assemble_tool_pool(
         self, builtin_tools: list[dict], builtin_handlers: dict[str, callable]
-    ) -> tuple[list[dict], dict[str, callable], dict[str, str]]:
+    ) -> tuple[list[dict], dict[str, callable]]:
         """
         组装动态工具池（内置 + MCP）。
 
@@ -145,17 +135,15 @@ class MCPRegistry:
             builtin_handlers: 内置工具 handler
 
         Returns:
-            (tools, handlers, policies) 三元组：
+            (tools, handlers) 二元组：
             - tools: 合并后的工具定义列表
             - handlers: 合并后的 handler 字典
-            - policies: {prefixed_name: policy} 映射
 
         Raises:
             ValueError: 命名冲突、名称过长、schema 非法
         """
         tools = list(builtin_tools)
         handlers = dict(builtin_handlers)
-        policies: dict[str, str] = {}
 
         # 记录已用的名称及其来源（用于冲突诊断）
         origins = {
@@ -211,12 +199,7 @@ class MCPRegistry:
                     client.call_tool(tool, kwargs)
                 )
 
-                # 应用宿主侧策略（不信任 server 的 readOnlyHint）
-                policy = self.host_policy.get((server_name, raw_name), "confirm")
-                policies[prefixed] = policy
-
-        self.tool_policies = policies
-        return tools, handlers, policies
+        return tools, handlers
 
     def cleanup(self) -> None:
         """
@@ -233,8 +216,6 @@ class MCPRegistry:
                     pass  # 静默失败
 
         self.clients.clear()
-        self.host_policy.clear()
-        self.tool_policies.clear()
 
 
 # 全局注册表（单例）
@@ -271,7 +252,7 @@ def connect_mcp(name: str, client: MCPClient) -> str:
 
 def assemble_tool_pool(
     builtin_tools: list[dict], builtin_handlers: dict[str, callable]
-) -> tuple[list[dict], dict[str, callable], dict[str, str]]:
+) -> tuple[list[dict], dict[str, callable]]:
     """
     组装动态工具池（便捷函数）。
 
@@ -280,7 +261,7 @@ def assemble_tool_pool(
         builtin_handlers: 内置工具 handler
 
     Returns:
-        (tools, handlers, policies) 三元组
+        (tools, handlers) 二元组
     """
     registry = get_registry()
     return registry.assemble_tool_pool(builtin_tools, builtin_handlers)

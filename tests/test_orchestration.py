@@ -52,7 +52,7 @@ def fake_provider(monkeypatch):
         def get_model_name(self):
             return "fake-model"
 
-        def chat(self, messages, tools, system, max_tokens):
+        def chat(self, messages, tools, system, max_tokens, on_text=None):
             # 模拟模型返回：写一个文件
             last_msg = messages[-1] if messages else {}
             content_str = str(last_msg.get("content", ""))
